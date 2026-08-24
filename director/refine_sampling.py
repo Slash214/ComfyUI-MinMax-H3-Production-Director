@@ -437,6 +437,7 @@ def apply_segment_refine(
     first_pass_images: torch.Tensor | None = None,
     trim_frames: int = 0,
     on_pass: RefinePassCallback | None = None,
+    memory_debug=None,
 ) -> tuple[dict, str]:
     """Run optional refine/upscale second sample. Never raises — returns first-pass on failure.
 
@@ -475,6 +476,8 @@ def apply_segment_refine(
         if refine_needs_canvas(pack):
             tw, th = _resolve_refine_canvas(plan, pack)
             if refine_uses_h3_latent(pack):
+                if memory_debug is not None:
+                    memory_debug.checkpoint("Before H3 Latent Upscale")
                 work, refine_positive, extra = _apply_h3_latent_upscale(
                     work,
                     pack,
@@ -490,6 +493,8 @@ def apply_segment_refine(
                 )
                 note_parts.extend(extra)
                 last_ok = work
+                if memory_debug is not None:
+                    memory_debug.checkpoint("After H3 Latent Upscale")
             else:
                 if on_phase:
                     on_phase("upscale", 0)
@@ -583,6 +588,8 @@ def apply_segment_refine(
             )
             if on_phase:
                 on_phase("refine", (i + 0.5) / n_passes)
+            if memory_debug is not None and i == 0:
+                memory_debug.checkpoint("Before Refine Sampling")
             work = sample_single_stage(
                 model=refine_model,
                 positive=refine_positive,
@@ -604,6 +611,8 @@ def apply_segment_refine(
                 apply_shift=True,
             )
             last_ok = work
+            if memory_debug is not None and i == 0:
+                memory_debug.checkpoint("After Refine Sampling")
             if on_pass is not None:
                 try:
                     on_pass(i + 1, n_passes, work)

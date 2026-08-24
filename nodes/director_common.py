@@ -93,6 +93,26 @@ def director_perf_inputs() -> dict:
                 "tooltip": "输出 source_images（时间轴原片帧对比）。默认关以节省内存。",
             },
         ),
+        "memory_strategy": (
+            ["standard", "balanced_20gb", "aggressive_lowmem"],
+            {
+                "default": "standard",
+                "tooltip": (
+                    "内存策略（Phase 1 仅 standard 生效；其余为后续 lowmem 预留，"
+                    "当前不改变生成行为）。"
+                ),
+            },
+        ),
+        "memory_debug": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "开启 RAM/VRAM/耗时诊断日志（ComfyUI 控制台 + report）。"
+                    "Phase 1 只观察，不修改执行逻辑。"
+                ),
+            },
+        ),
     }
 
 

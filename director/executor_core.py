@@ -70,6 +70,7 @@ from .segment_continuity import (
     resolve_prev_segment_output,
 )
 from .vram_cleanup import cleanup_segment_vram
+from .memory_debug import DirectorMemoryDebug
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
@@ -253,6 +254,8 @@ def execute_director_plan_core(
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
+    memory_strategy: str = "standard",
+    memory_debug: bool = False,
 ) -> tuple[
     torch.Tensor,
     list[torch.Tensor],
@@ -263,6 +266,11 @@ def execute_director_plan_core(
     list[torch.Tensor],
 ]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
+    mem = DirectorMemoryDebug(
+        enabled=memory_debug,
+        memory_strategy=memory_strategy,
+        node_id=node_id,
+    )
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
     # UI toggle on the player bar (timeline.liveTaePreview); default on.
@@ -300,6 +308,10 @@ def execute_director_plan_core(
         reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
     if clear_vram_between_segments:
         reports.append("VRAM: 段间清理显存已开启。")
+    if memory_debug:
+        reports.append(
+            f"Memory debug: ON (strategy={mem.memory_strategy}, observe-only Phase 1)."
+        )
     if audio_mode == AUDIO_MODE_MUTE:
         reports.append("Audio: muted — skip audio VAE decode, silent AUDIO output.")
     elif audio_mode == AUDIO_MODE_SOURCE:
@@ -358,9 +370,13 @@ def execute_director_plan_core(
     completed_av_handoff: dict[int, dict] = {}
     completed_audios: dict[int, dict] = {}
 
+    mem.begin_run(plan_note=plan_summary(plan))
+
     def _run_one_segment(
         seg, *, progress_index: int
     ) -> tuple[torch.Tensor, dict[str, Any] | None, torch.Tensor]:
+        mem.begin_segment(progress_index, seg_total)
+        mem.checkpoint("Before First Sampling")
         if seg.task_key not in SUPPORTED_TASK_KEYS:
             raise ValueError(
                 f"Task '{seg.task_key}' is not supported on MiniMax H3 Director. "
@@ -798,6 +814,7 @@ def execute_director_plan_core(
             on_step_preview=_report_step_preview if live_tae_preview else None,
             preview_every=1,
         )
+        mem.checkpoint("After First Sampling")
 
         first_pass_gpu = None
         pre_export = None
@@ -808,10 +825,18 @@ def execute_director_plan_core(
                     node_id, segment_index=progress_index, segment_total=seg_total,
                     phase="decode", phase_value=0, phase_max=1, **meta,
                 )
+                mem.checkpoint("Before First VAE Decode")
                 first_pass_gpu, _ = _decode_av_latent(
                     samples, vae, audio_vae, decode_audio=False,
                 )
                 pre_export = first_pass_gpu.detach().cpu().float()
+                mem.track_copy(
+                    label="pre_export",
+                    op="first_pass_gpu.detach().cpu().float()",
+                    src=first_pass_gpu,
+                    result=pre_export,
+                )
+                mem.checkpoint("After First VAE Decode")
             except Exception as exc:
                 log.warning(
                     "Segment %s first-pass decode for images_pre_refine failed (%s).",
@@ -853,6 +878,12 @@ def execute_director_plan_core(
                     plan=plan,
                 )
                 frames_p = decoded_p.cpu().float()
+                mem.track_copy(
+                    label=f"refine_pass_{pass_i}_mp4",
+                    op="decoded_p.cpu().float()",
+                    src=decoded_p,
+                    result=frames_p,
+                )
                 del decoded_p
                 path = maybe_export_segment_mp4(
                     mp4_run_dir,
@@ -897,6 +928,7 @@ def execute_director_plan_core(
             first_pass_images=upscale_frames,
             trim_frames=trim_frames,
             on_pass=_export_refine_pass if mp4_run_dir is not None else None,
+            memory_debug=mem,
         )
         del upscale_frames
         if first_pass_gpu is not None:
@@ -907,6 +939,7 @@ def execute_director_plan_core(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=0, phase_max=1, **meta,
         )
+        mem.checkpoint("Before Final VAE Decode")
         decoded, audio_dict = _decode_av_latent(
             samples, vae, audio_vae, decode_audio=decode_audio,
         )
@@ -927,6 +960,12 @@ def execute_director_plan_core(
         )
 
         chunk = decoded.cpu().float()
+        mem.track_copy(
+            label="chunk",
+            op="decoded.cpu().float()",
+            src=decoded,
+            result=chunk,
+        )
         if pre_export is not None:
             pre_export, _ = _trim_decoded_to_export(
                 pre_export,
@@ -936,8 +975,15 @@ def execute_director_plan_core(
                 plan=plan,
             )
             pre_chunk = pre_export.cpu().float()
+            mem.track_copy(
+                label="pre_chunk",
+                op="pre_export.cpu().float()",
+                src=pre_export,
+                result=pre_chunk,
+            )
         else:
             pre_chunk = chunk
+        mem.checkpoint("After Final VAE Decode")
         handoff = {
             "trim_frames": int(trim_frames),
             "export_frames": int(chunk.shape[0]),
@@ -962,6 +1008,7 @@ def execute_director_plan_core(
         completed_pre_refine[seg.index] = pre_chunk
         completed_refine_passes[seg.index] = pass_clips
 
+        mem.checkpoint("Before MP4 Export")
         #「分段导出」: flush mp4 as soon as this segment succeeds (crash-safe).
         # Final clip = last refine pass; _pre = 一采; _pN = each refine round.
         mp4_paths = maybe_export_segment_mp4s(
@@ -986,6 +1033,7 @@ def execute_director_plan_core(
                 f"Segment {ui_idx + 1}/{timeline_seg_total}: "
                 f"{mp4_export_kind(mp4_path)} saved → {mp4_path}"
             )
+        mem.checkpoint("After MP4 Export")
 
         if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and decoded.shape[0] >= 1:
             try:
@@ -1018,6 +1066,7 @@ def execute_director_plan_core(
             "MiniMax H3 Director segment %d/%d done (%d frames, task=%s)",
             ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
         )
+        mem.finish_segment()
         return chunk, audio_dict, pre_chunk
 
     for seg in all_segments:
@@ -1170,6 +1219,10 @@ def execute_director_plan_core(
         if same_as_final
         else concat_continuous_chunks(pre_source, export_segments, plan)
     )
+    mem.finish_run()
+    debug_report = mem.report_section()
+    if debug_report:
+        reports.append(debug_report.strip())
     return (
         combined,
         segment_outputs,
