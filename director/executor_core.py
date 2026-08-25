@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import time
 from typing import Any
 
 import torch
@@ -69,8 +71,15 @@ from .segment_continuity import (
     is_continuity_active,
     resolve_prev_segment_output,
 )
-from .vram_cleanup import cleanup_segment_vram
 from .memory_debug import DirectorMemoryDebug
+from .memory_policy import (
+    can_defer_pre_refine_decode,
+    gpu_refine_model_recommendation,
+    is_balanced_strategy,
+    run_end_policy,
+    segment_vram_cleanup,
+    soft_release_workspace,
+)
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
@@ -101,6 +110,35 @@ def _decode_av_latent(samples, vae, audio_vae, *, decode_audio: bool = True):
 
     audio_out = VAEDecodeAudio.execute(audio_vae, audio_latent)
     audio = _unpack_node_output(audio_out)[0]
+    return images, audio
+
+
+def _decode_av_latent_timed(
+    samples,
+    vae,
+    audio_vae,
+    *,
+    decode_audio: bool,
+    memory_debug: DirectorMemoryDebug | None,
+    timing_prefix: str,
+):
+    load_ctx = (
+        memory_debug.watch_model_load(timing_prefix)
+        if memory_debug is not None and memory_debug.enabled
+        else contextlib.nullcontext()
+    )
+    if memory_debug is not None and memory_debug.enabled:
+        memory_debug.timing(f"{timing_prefix} VAE Decode Start")
+    t0 = time.perf_counter()
+    with load_ctx:
+        images, audio = _decode_av_latent(
+            samples, vae, audio_vae, decode_audio=decode_audio,
+        )
+    if memory_debug is not None and memory_debug.enabled:
+        memory_debug.timing(
+            f"{timing_prefix} VAE Decode End",
+            elapsed_s=time.perf_counter() - t0,
+        )
     return images, audio
 
 
@@ -311,6 +349,11 @@ def execute_director_plan_core(
     if memory_debug:
         reports.append(
             f"Memory debug: ON (strategy={mem.memory_strategy}, observe-only Phase 1)."
+        )
+    if is_balanced_strategy(mem.memory_strategy):
+        reports.append(
+            "Memory strategy: balanced_20gb — deferred pre-refine VAE when safe, "
+            "RAM-aware segment/run cleanup (generation params unchanged)."
         )
     if audio_mode == AUDIO_MODE_MUTE:
         reports.append("Audio: muted — skip audio VAE decode, silent AUDIO output.")
@@ -769,7 +812,11 @@ def execute_director_plan_core(
         )
 
         if clear_vram_between_segments:
-            cleanup_segment_vram(enabled=True, unload_models=seg_total > 1)
+            segment_vram_cleanup(
+                strategy=mem.memory_strategy,
+                enabled=True,
+                unload_models=seg_total > 1,
+            )
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(
@@ -813,21 +860,43 @@ def execute_director_plan_core(
             on_phase=_report_sample_phase,
             on_step_preview=_report_step_preview if live_tae_preview else None,
             preview_every=1,
+            memory_debug=mem if mem.enabled else None,
+            timing_prefix="First",
         )
         mem.checkpoint("After First Sampling")
 
         first_pass_gpu = None
         pre_export = None
         will_refine = refine_will_sample(plan, seg)
-        if will_refine:
+        pack = getattr(plan, "refine", None)
+        defer_pre_decode = (
+            is_balanced_strategy(mem.memory_strategy)
+            and can_defer_pre_refine_decode(
+                will_refine=will_refine,
+                trim_frames=trim_frames,
+                pack=pack if isinstance(pack, dict) else None,
+            )
+        )
+        first_pass_latent_for_defer = samples if defer_pre_decode else None
+        if defer_pre_decode:
+            reports.append(
+                f"Seg #{seg.index + 1}: balanced — deferred first-pass VAE decode "
+                "until after refine (H3 stages stay contiguous)."
+            )
+        if will_refine and not defer_pre_decode:
             try:
                 report_director_progress(
                     node_id, segment_index=progress_index, segment_total=seg_total,
                     phase="decode", phase_value=0, phase_max=1, **meta,
                 )
                 mem.checkpoint("Before First VAE Decode")
-                first_pass_gpu, _ = _decode_av_latent(
-                    samples, vae, audio_vae, decode_audio=False,
+                first_pass_gpu, _ = _decode_av_latent_timed(
+                    samples,
+                    vae,
+                    audio_vae,
+                    decode_audio=False,
+                    memory_debug=mem,
+                    timing_prefix="First Pre-Refine",
                 )
                 pre_export = first_pass_gpu.detach().cpu().float()
                 mem.track_copy(
@@ -846,7 +915,6 @@ def execute_director_plan_core(
                 first_pass_gpu = None
                 pre_export = None
 
-        pack = getattr(plan, "refine", None)
         upscale_frames = (
             first_pass_gpu
             if isinstance(pack, dict) and refine_needs_canvas(pack)
@@ -929,19 +997,62 @@ def execute_director_plan_core(
             trim_frames=trim_frames,
             on_pass=_export_refine_pass if mp4_run_dir is not None else None,
             memory_debug=mem,
+            memory_strategy=mem.memory_strategy,
         )
         del upscale_frames
         if first_pass_gpu is not None:
             del first_pass_gpu
             first_pass_gpu = None
 
+        if defer_pre_decode and first_pass_latent_for_defer is not None and pre_export is None:
+            try:
+                report_director_progress(
+                    node_id, segment_index=progress_index, segment_total=seg_total,
+                    phase="decode", phase_value=0, phase_max=1, **meta,
+                )
+                mem.checkpoint("Before First VAE Decode")
+                deferred_gpu, _ = _decode_av_latent_timed(
+                    first_pass_latent_for_defer,
+                    vae,
+                    audio_vae,
+                    decode_audio=False,
+                    memory_debug=mem,
+                    timing_prefix="First Pre-Refine",
+                )
+                pre_export = deferred_gpu.detach().cpu().float()
+                mem.track_copy(
+                    label="pre_export_deferred",
+                    op="deferred first_pass.detach().cpu().float()",
+                    src=deferred_gpu,
+                    result=pre_export,
+                )
+                mem.checkpoint("After First VAE Decode")
+                del deferred_gpu
+                if is_balanced_strategy(mem.memory_strategy):
+                    soft_release_workspace(
+                        strategy=mem.memory_strategy,
+                        reason="post_deferred_pre_refine_decode",
+                    )
+            except Exception as exc:
+                log.warning(
+                    "Segment %s deferred first-pass decode failed (%s).",
+                    ui_idx + 1,
+                    exc,
+                )
+                pre_export = None
+
         report_director_progress(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=0, phase_max=1, **meta,
         )
         mem.checkpoint("Before Final VAE Decode")
-        decoded, audio_dict = _decode_av_latent(
-            samples, vae, audio_vae, decode_audio=decode_audio,
+        decoded, audio_dict = _decode_av_latent_timed(
+            samples,
+            vae,
+            audio_vae,
+            decode_audio=decode_audio,
+            memory_debug=mem,
+            timing_prefix="Final",
         )
         # Keep exactly the UI segment length. With motion context, sample is
         # longer (visible+ctx, 17k+5 aligned); after trim, crop to num_frames.
@@ -959,7 +1070,11 @@ def execute_director_plan_core(
             phase="decode", phase_value=1, phase_max=1, **meta,
         )
 
+        if mem.enabled:
+            mem.timing("Final Video Transfer Start")
         chunk = decoded.cpu().float()
+        if mem.enabled:
+            mem.timing("Final Video Transfer End")
         mem.track_copy(
             label="chunk",
             op="decoded.cpu().float()",
@@ -984,6 +1099,12 @@ def execute_director_plan_core(
         else:
             pre_chunk = chunk
         mem.checkpoint("After Final VAE Decode")
+        if is_balanced_strategy(mem.memory_strategy):
+            del decoded
+            soft_release_workspace(
+                strategy=mem.memory_strategy,
+                reason="post_final_decode",
+            )
         handoff = {
             "trim_frames": int(trim_frames),
             "export_frames": int(chunk.shape[0]),
@@ -1035,13 +1156,13 @@ def execute_director_plan_core(
             )
         mem.checkpoint("After MP4 Export")
 
-        if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and decoded.shape[0] >= 1:
+        if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and chunk.shape[0] >= 1:
             try:
                 frames_b64 = [
-                    tensor_frame_to_jpeg_b64(decoded[i])
-                    for i in range(int(decoded.shape[0]))
+                    tensor_frame_to_jpeg_b64(chunk[i])
+                    for i in range(int(chunk.shape[0]))
                 ]
-                h, w = int(decoded.shape[1]), int(decoded.shape[2])
+                h, w = int(chunk.shape[1]), int(chunk.shape[2])
                 report_director_segment_preview(
                     node_id,
                     segment_index=ui_idx,
@@ -1055,7 +1176,11 @@ def execute_director_plan_core(
                 log.debug("Segment video preview skipped: %s", exc)
 
         if clear_vram_between_segments:
-            cleanup_segment_vram(enabled=True)
+            segment_vram_cleanup(
+                strategy=mem.memory_strategy,
+                enabled=True,
+                unload_models=True,
+            )
 
         reports.append(
             f"Segment {ui_idx + 1}/{timeline_seg_total}: {task_hint} "
@@ -1072,7 +1197,11 @@ def execute_director_plan_core(
     for seg in all_segments:
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
-                cleanup_segment_vram(enabled=True)
+                segment_vram_cleanup(
+                    strategy=mem.memory_strategy,
+                    enabled=True,
+                    unload_models=True,
+                )
             chunk, audio_dict, pre_chunk = _run_one_segment(
                 seg, progress_index=progress_pos[seg.index]
             )
@@ -1223,6 +1352,11 @@ def execute_director_plan_core(
     debug_report = mem.report_section()
     if debug_report:
         reports.append(debug_report.strip())
+    for note in run_end_policy(mem.memory_strategy):
+        reports.append(note)
+    rec = gpu_refine_model_recommendation(plan, strategy=mem.memory_strategy)
+    if rec:
+        reports.append(rec)
     return (
         combined,
         segment_outputs,
