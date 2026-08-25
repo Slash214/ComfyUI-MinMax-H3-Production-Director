@@ -592,7 +592,14 @@ def apply_segment_refine(
             if on_phase:
                 on_phase("refine", (i + 0.5) / n_passes)
             if memory_debug is not None and i == 0:
-                memory_debug.checkpoint("Before Refine Sampling")
+                # Post-upscale latent: this is the real peak of the whole run.
+                # Log the token count here (not before upscale) so the number
+                # reflects what attention and the feed-forward actually see.
+                probe = getattr(memory_debug, "probe", None)
+                if callable(probe):
+                    probe("Before Refine Sampling", latent=work, models=True)
+                else:
+                    memory_debug.checkpoint("Before Refine Sampling")
             work = sample_single_stage(
                 model=refine_model,
                 positive=refine_positive,

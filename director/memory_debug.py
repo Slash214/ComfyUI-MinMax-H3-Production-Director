@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sys
 import time
 from typing import Any, Iterator
@@ -15,6 +16,10 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.memory")
 MEMORY_STRATEGIES = ("standard", "balanced_20gb", "aggressive_lowmem")
 
 _NVML = {"ready": False, "failed": False, "device": None}
+
+# Windows PDH handle for the "GPU Process Memory" counter set. Opened lazily and
+# reused; used to read WDDM *shared* GPU memory, which NVML does not report.
+_PDH: dict[str, Any] = {"ready": False, "failed": False}
 
 
 def normalize_memory_strategy(value: str | None) -> str:
@@ -232,6 +237,120 @@ def _cuda_stats() -> dict[str, float | None]:
     return out
 
 
+def _init_gpu_shared_pdh() -> bool:
+    """Open a PDH query for this process's WDDM shared GPU memory (Windows only).
+
+    NVML only reports *dedicated* VRAM. On Windows, once dedicated VRAM fills,
+    the WDDM driver silently pages allocations into system RAM over PCIe — the
+    generation keeps running but the whole desktop stutters. That spill is
+    invisible to NVML and to the torch allocator; this counter is the only
+    direct measurement of it.
+    """
+    if _PDH["ready"]:
+        return True
+    if _PDH["failed"] or sys.platform != "win32":
+        _PDH["failed"] = True
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        pdh = ctypes.WinDLL("pdh.dll")
+
+        query = ctypes.c_void_p()
+        if int(pdh.PdhOpenQueryW(None, 0, ctypes.byref(query))) != 0:
+            raise OSError("PdhOpenQueryW failed")
+
+        # Expand "\GPU Process Memory(*)\Shared Usage" and keep our own pid's
+        # instances (one per physical GPU / LUID).
+        wildcard = "\\GPU Process Memory(*)\\Shared Usage"
+        size = wintypes.DWORD(0)
+        pdh.PdhExpandWildCardPathW(None, wildcard, None, ctypes.byref(size), 0)
+        if int(size.value) <= 0:
+            raise OSError("PdhExpandWildCardPathW returned no paths")
+        buf = ctypes.create_unicode_buffer(int(size.value))
+        if int(pdh.PdhExpandWildCardPathW(None, wildcard, buf, ctypes.byref(size), 0)) != 0:
+            raise OSError("PdhExpandWildCardPathW failed")
+
+        # MULTI_SZ: NUL-separated, double-NUL terminated. Slicing a c_wchar
+        # array yields a str that keeps the embedded NULs, so split on them.
+        raw = buf[: int(size.value)]
+        paths = [p for p in raw.split("\x00") if p]
+        needle = f"pid_{os.getpid()}_"
+        mine = [p for p in paths if needle in p]
+        if not mine:
+            raise OSError("no GPU Process Memory instance for this pid")
+
+        counters = []
+        for path in mine:
+            handle = ctypes.c_void_p()
+            if int(pdh.PdhAddEnglishCounterW(query, path, 0, ctypes.byref(handle))) == 0:
+                counters.append(handle)
+        if not counters:
+            raise OSError("PdhAddEnglishCounterW added no counters")
+
+        pdh.PdhCollectQueryData(query)
+        _PDH.update({"lib": pdh, "query": query, "counters": counters, "ready": True})
+        return True
+    except Exception as exc:
+        log.debug("GPU shared-memory PDH counter unavailable: %s", exc)
+        _PDH["failed"] = True
+        return False
+
+
+def _gpu_shared_mib() -> float | None:
+    """Sum this process's WDDM shared GPU memory in MiB, or None."""
+    if not _init_gpu_shared_pdh():
+        return None
+    try:
+        import ctypes
+
+        PDH_FMT_LARGE = 0x00000400
+
+        class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+            _fields_ = [
+                ("CStatus", ctypes.c_ulong),
+                ("largeValue", ctypes.c_longlong),
+            ]
+
+        pdh = _PDH["lib"]
+        pdh.PdhCollectQueryData(_PDH["query"])
+        total = 0
+        got = False
+        for handle in _PDH["counters"]:
+            value = PDH_FMT_COUNTERVALUE()
+            rc = pdh.PdhGetFormattedCounterValue(
+                handle, PDH_FMT_LARGE, None, ctypes.byref(value)
+            )
+            if int(rc) == 0:
+                total += int(value.largeValue)
+                got = True
+        if not got:
+            return None
+        return float(total) / (1024.0 * 1024.0)
+    except Exception as exc:
+        log.debug("GPU shared-memory read failed: %s", exc)
+        return None
+
+
+def _alloc_pressure() -> dict[str, Any]:
+    """Torch allocator pressure counters.
+
+    ``num_alloc_retries`` increments whenever the caching allocator failed to
+    serve a request, freed cached blocks and tried again. A run that climbs here
+    is thrashing, which on Windows is the in-process fingerprint of a WDDM
+    spill even when NVML still reports headroom.
+    """
+    out: dict[str, Any] = {"alloc_retries": None, "cuda_ooms": None}
+    try:
+        stats = torch.cuda.memory_stats(torch.cuda.current_device())
+        out["alloc_retries"] = int(stats.get("num_alloc_retries", 0))
+        out["cuda_ooms"] = int(stats.get("num_ooms", 0))
+    except Exception:
+        pass
+    return out
+
+
 def snapshot_memory() -> dict[str, Any]:
     rss = _process_rss_bytes()
     avail = _system_available_bytes()
@@ -241,7 +360,93 @@ def snapshot_memory() -> dict[str, Any]:
     }
     snap.update(_cuda_stats())
     snap.update(_nvml_stats())
+    snap["gpu_shared_mib"] = _gpu_shared_mib()
+    snap.update(_alloc_pressure())
     return snap
+
+
+def loaded_models_brief() -> list[str]:
+    """Names + VRAM of everything ComfyUI currently holds resident.
+
+    Used to answer a specific question: is the ~15GB Qwen3-VL text encoder still
+    resident during the refine pass, squeezing the second sampling on a 20GB
+    card? ``balanced_20gb`` deliberately skips ``unload_all_models`` while RAM is
+    plentiful, which helps system RAM but may hurt the refine VRAM peak.
+    """
+    out: list[str] = []
+    try:
+        import comfy.model_management as mm
+
+        for entry in getattr(mm, "current_loaded_models", []) or []:
+            model = getattr(entry, "model", None)
+            name = type(model).__name__ if model is not None else type(entry).__name__
+            inner = getattr(model, "model", None)
+            if inner is not None:
+                name = f"{name}<{type(inner).__name__}>"
+            size_mib = None
+            for attr in ("model_loaded_memory", "loaded_size", "model_size"):
+                probe = getattr(entry, attr, None)
+                try:
+                    value = probe() if callable(probe) else probe
+                except Exception:
+                    continue
+                if isinstance(value, (int, float)) and value > 0:
+                    size_mib = float(value) / (1024.0 * 1024.0)
+                    break
+            device = getattr(entry, "device", None)
+            out.append(
+                f"{name}"
+                + (f" {size_mib:.0f}MiB" if size_mib is not None else "")
+                + (f" @{device}" if device is not None else "")
+            )
+    except Exception as exc:
+        log.debug("loaded model dump failed: %s", exc)
+    return out
+
+
+def latent_token_estimate(latent: Any) -> dict[str, Any]:
+    """Estimate the packed video token count from a latent dict or tensor.
+
+    H3's DiT attends over a joint packed sequence (text + conditioning + audio +
+    video). The video part dominates and is what scales with resolution and
+    frame count, so ``T*H*W`` of the video latent is the number that decides
+    whether attention is in the cheap or the quadratic-tax regime — and how much
+    a feed-forward chunking patch would save.
+    """
+    info: dict[str, Any] = {
+        "shape": None,
+        "video_tokens": None,
+        "mib_bf16": None,
+        "extra": [],
+    }
+    try:
+        samples = latent.get("samples") if isinstance(latent, dict) else latent
+        if not torch.is_tensor(samples):
+            return info
+        shape = tuple(int(x) for x in samples.shape)
+        info["shape"] = shape
+        # H3 packs audio alongside video (see LTXVSeparateAVLatent). List any
+        # other tensors in the dict so the log shows the whole packed sequence,
+        # not just the stream under "samples".
+        if isinstance(latent, dict):
+            for key, value in latent.items():
+                if key == "samples" or not torch.is_tensor(value):
+                    continue
+                info["extra"].append(f"{key}={tuple(int(x) for x in value.shape)}")
+        if len(shape) == 5:  # [B, C, T, H, W]
+            _b, c, t, h, w = shape
+            info["video_tokens"] = int(t) * int(h) * int(w)
+            # H3's first FFN projection intermediate is ~56 KiB per token.
+            info["mib_bf16"] = round(info["video_tokens"] * 56.0 / 1024.0, 1)
+            info["channels"] = int(c)
+        elif len(shape) == 4:  # [B, C, H, W]
+            _b, c, h, w = shape
+            info["video_tokens"] = int(h) * int(w)
+            info["mib_bf16"] = round(info["video_tokens"] * 56.0 / 1024.0, 1)
+            info["channels"] = int(c)
+    except Exception:
+        pass
+    return info
 
 
 def _tensor_brief(value: Any) -> str:
@@ -350,11 +555,50 @@ class DirectorMemoryDebug:
             parts.append(f"NVMLFree={snap['nvml_free_mib']:.1f}MiB")
         if snap.get("nvml_total_mib") is not None:
             parts.append(f"NVMLTotal={snap['nvml_total_mib']:.1f}MiB")
+        # WDDM spill indicators — the reason a refine pass can make the whole
+        # desktop stutter while NVML still looks fine.
+        if snap.get("gpu_shared_mib") is not None:
+            parts.append(f"GPUShared={snap['gpu_shared_mib']:.1f}MiB")
+        if snap.get("alloc_retries"):
+            parts.append(f"AllocRetries={snap['alloc_retries']}")
+        if snap.get("cuda_ooms"):
+            parts.append(f"CudaOOMs={snap['cuda_ooms']}")
         if elapsed_s is not None:
             parts.append(f"Δt={elapsed_s:.2f}s")
         line = " | ".join(parts)
         self._lines.append(line)
         log.info(line)
+
+    def probe(self, label: str, *, latent: Any = None, models: bool = False) -> None:
+        """Checkpoint plus optional latent token count and resident model dump.
+
+        Used at the sampling boundaries so a log can answer, without guesswork:
+        how many tokens each pass attends over, what is resident at that moment,
+        and whether the allocator is thrashing.
+        """
+        if not self.enabled:
+            return
+        self.checkpoint(label)
+        if latent is not None:
+            info = latent_token_estimate(latent)
+            if info.get("video_tokens"):
+                extra = info.get("extra") or []
+                line = (
+                    f"[Tokens] {label} | latent={info['shape']} | "
+                    f"video_tokens={info['video_tokens']:,} | "
+                    f"ffn_intermediate~{info['mib_bf16']:.0f}MiB "
+                    f"(chunk x2 would save ~{info['mib_bf16'] * 0.37:.0f}MiB)"
+                    + (f" | other streams: {', '.join(extra)}" if extra else "")
+                )
+                self._lines.append(line)
+                log.info(line)
+        if models:
+            resident = loaded_models_brief()
+            line = f"[Resident] {label} | " + (
+                "; ".join(resident) if resident else "(none reported)"
+            )
+            self._lines.append(line)
+            log.info(line)
 
     def timing(self, label: str, *, elapsed_s: float | None = None) -> None:
         if not self.enabled:

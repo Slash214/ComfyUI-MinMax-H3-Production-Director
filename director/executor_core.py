@@ -350,6 +350,19 @@ def execute_director_plan_core(
         reports.append(
             f"Memory debug: ON (strategy={mem.memory_strategy}, observe-only Phase 1)."
         )
+        # Environment report: whether comfy_kitchen's H3 int8-convrot kernels are
+        # live, which attention backend is in use, who owns PackedLayout, and
+        # whether the installed core carries known high-VRAM paths. Without this
+        # a timing benchmark cannot be compared against anyone else's.
+        try:
+            from .env_diagnostics import log_report_once
+
+            env_text = log_report_once()
+            if env_text:
+                reports.append("")
+                reports.append(env_text)
+        except Exception as env_exc:
+            log.debug("Environment report skipped: %s", env_exc)
     if is_balanced_strategy(mem.memory_strategy):
         reports.append(
             "Memory strategy: balanced_20gb — deferred pre-refine VAE when safe, "
@@ -845,6 +858,9 @@ def execute_director_plan_core(
             except Exception as exc:
                 log.debug("Live TAE preview skipped: %s", exc)
 
+        # Token count + resident model dump for the first pass, so the refine
+        # numbers below have a baseline to be compared against.
+        mem.probe("First Sampling (pre)", latent=latent, models=True)
         samples = sample_single_stage(
             model=model,
             positive=positive,
@@ -975,6 +991,11 @@ def execute_director_plan_core(
                     exc,
                 )
 
+        # The refine pass is where a 20GB card is most likely to run out of
+        # dedicated VRAM: the latent is several times larger than the first
+        # pass, and under balanced_20gb nothing has been unloaded. Capture what
+        # is resident and how many tokens are about to be attended over.
+        mem.probe("Refine (pre)", latent=samples, models=True)
         samples, refine_note = apply_segment_refine(
             plan,
             seg,

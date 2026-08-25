@@ -58,4 +58,15 @@ try:
 except Exception as _director_routes_exc:
     _log.warning("MiniMax H3 Director HTTP routes failed to load: %s", _director_routes_exc)
 
+# One-shot environment report at startup. Read-only: it never loads models or
+# changes ComfyUI state. Surfaces silently-degraded setups (e.g. ComfyUI
+# disabling the comfy_kitchen CUDA backend when torch reports CUDA < 13, which
+# drops H3's int8-convrot path onto an emulated kernel).
+try:
+    from .director.env_diagnostics import log_report_once as _h3_env_report
+
+    _h3_env_report()
+except Exception as _director_env_exc:
+    _log.debug("MiniMax H3 Director environment report skipped: %s", _director_env_exc)
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
