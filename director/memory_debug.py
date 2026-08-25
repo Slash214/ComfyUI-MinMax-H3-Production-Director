@@ -1,17 +1,20 @@
-"""RAM / VRAM / timing diagnostics for MiniMax H3 Director (Phase 1: observe only)."""
+"""RAM / VRAM / timing diagnostics for MiniMax H3 Director."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 import time
-from typing import Any
+from typing import Any, Iterator
 
 import torch
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.memory")
 
 MEMORY_STRATEGIES = ("standard", "balanced_20gb", "aggressive_lowmem")
+
+_NVML = {"ready": False, "failed": False, "device": None}
 
 
 def normalize_memory_strategy(value: str | None) -> str:
@@ -111,6 +114,101 @@ def _system_available_bytes() -> int | None:
     return None
 
 
+def system_available_gib() -> float | None:
+    avail = _system_available_bytes()
+    if avail is None:
+        return None
+    return float(avail) / (1024.0 ** 3)
+
+
+def _init_nvml() -> bool:
+    if _NVML["ready"]:
+        return True
+    if _NVML["failed"]:
+        return False
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        index = 0
+        if torch.cuda.is_available():
+            try:
+                index = int(torch.cuda.current_device())
+            except Exception:
+                index = 0
+        _NVML["device"] = pynvml.nvmlDeviceGetHandleByIndex(index)
+        _NVML["backend"] = "pynvml"
+        _NVML["ready"] = True
+        return True
+    except Exception:
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            nvml = ctypes.WinDLL("nvml.dll")
+            nvml.nvmlInit_v2.restype = ctypes.c_int
+            if int(nvml.nvmlInit_v2()) != 0:
+                raise OSError("nvmlInit_v2 failed")
+            index = 0
+            if torch.cuda.is_available():
+                try:
+                    index = int(torch.cuda.current_device())
+                except Exception:
+                    index = 0
+            handle = ctypes.c_void_p()
+            if int(nvml.nvmlDeviceGetHandleByIndex(index, ctypes.byref(handle))) != 0:
+                raise OSError("nvmlDeviceGetHandleByIndex failed")
+            _NVML["lib"] = nvml
+            _NVML["device"] = handle
+            _NVML["backend"] = "ctypes"
+            _NVML["ready"] = True
+            return True
+        except Exception:
+            pass
+    _NVML["failed"] = True
+    return False
+
+
+def _nvml_stats() -> dict[str, float | None]:
+    out: dict[str, float | None] = {
+        "nvml_used_mib": None,
+        "nvml_free_mib": None,
+        "nvml_total_mib": None,
+    }
+    if not _init_nvml():
+        return out
+    try:
+        backend = _NVML.get("backend")
+        if backend == "pynvml":
+            import pynvml
+
+            info = pynvml.nvmlDeviceGetMemoryInfo(_NVML["device"])
+            out["nvml_used_mib"] = _bytes_to_mib(info.used)
+            out["nvml_free_mib"] = _bytes_to_mib(info.free)
+            out["nvml_total_mib"] = _bytes_to_mib(info.total)
+        elif backend == "ctypes":
+            import ctypes
+
+            class nvmlMemory_t(ctypes.Structure):
+                _fields_ = [
+                    ("total", ctypes.c_ulonglong),
+                    ("free", ctypes.c_ulonglong),
+                    ("used", ctypes.c_ulonglong),
+                ]
+
+            mem = nvmlMemory_t()
+            nvml = _NVML["lib"]
+            nvml.nvmlDeviceGetMemoryInfo.restype = ctypes.c_int
+            if int(nvml.nvmlDeviceGetMemoryInfo(_NVML["device"], ctypes.byref(mem))) == 0:
+                out["nvml_used_mib"] = _bytes_to_mib(mem.used)
+                out["nvml_free_mib"] = _bytes_to_mib(mem.free)
+                out["nvml_total_mib"] = _bytes_to_mib(mem.total)
+    except Exception as exc:
+        log.debug("NVML memory read failed: %s", exc)
+    return out
+
+
 def _cuda_stats() -> dict[str, float | None]:
     out: dict[str, float | None] = {
         "cuda_allocated_mib": None,
@@ -142,6 +240,7 @@ def snapshot_memory() -> dict[str, Any]:
         "system_available_mib": _bytes_to_mib(avail),
     }
     snap.update(_cuda_stats())
+    snap.update(_nvml_stats())
     return snap
 
 
@@ -222,6 +321,8 @@ class DirectorMemoryDebug:
         self._segment_total = 0
         self._lines: list[str] = []
         self._copy_lines: list[str] = []
+        self._timing_lines: list[str] = []
+        self._phase_totals: dict[str, float] = {}
 
     def _prefix(self) -> str:
         nid = f" node={self.node_id}" if self.node_id else ""
@@ -236,18 +337,76 @@ class DirectorMemoryDebug:
         ]
         avail = snap.get("system_available_mib")
         if avail is not None:
-            parts.append(f"avail={avail:.1f}MiB")
+            parts.append(f"AvailRAM={avail:.1f}MiB")
         if snap.get("cuda_allocated_mib") is not None:
-            parts.append(f"CUDA alloc={snap['cuda_allocated_mib']:.1f}MiB")
+            parts.append(f"TorchAlloc={snap['cuda_allocated_mib']:.1f}MiB")
         if snap.get("cuda_reserved_mib") is not None:
-            parts.append(f"reserved={snap['cuda_reserved_mib']:.1f}MiB")
+            parts.append(f"TorchReserved={snap['cuda_reserved_mib']:.1f}MiB")
         if snap.get("cuda_max_allocated_mib") is not None:
-            parts.append(f"max={snap['cuda_max_allocated_mib']:.1f}MiB")
+            parts.append(f"TorchMax={snap['cuda_max_allocated_mib']:.1f}MiB")
+        if snap.get("nvml_used_mib") is not None:
+            parts.append(f"NVMLUsed={snap['nvml_used_mib']:.1f}MiB")
+        if snap.get("nvml_free_mib") is not None:
+            parts.append(f"NVMLFree={snap['nvml_free_mib']:.1f}MiB")
+        if snap.get("nvml_total_mib") is not None:
+            parts.append(f"NVMLTotal={snap['nvml_total_mib']:.1f}MiB")
         if elapsed_s is not None:
             parts.append(f"Δt={elapsed_s:.2f}s")
         line = " | ".join(parts)
         self._lines.append(line)
         log.info(line)
+
+    def timing(self, label: str, *, elapsed_s: float | None = None) -> None:
+        if not self.enabled:
+            return
+        snap = snapshot_memory()
+        parts = [f"[Timing] {label}"]
+        if elapsed_s is not None:
+            parts.append(f"elapsed={elapsed_s:.2f}s")
+        if snap.get("nvml_used_mib") is not None:
+            parts.append(f"NVMLUsed={snap['nvml_used_mib']:.1f}MiB")
+        if snap.get("process_rss_mib") is not None:
+            parts.append(f"RSS={snap['process_rss_mib']:.1f}MiB")
+        line = " | ".join(parts)
+        self._timing_lines.append(line)
+        log.info(line)
+
+    def note_phase_total(self, phase: str, seconds: float) -> None:
+        if not self.enabled:
+            return
+        self._phase_totals[phase] = float(seconds)
+        self.timing(
+            f"{phase} total={seconds:.2f}s "
+            f"(Model Load / Sampler / Cleanup breakdown in prior [Timing] lines)",
+        )
+
+    @contextlib.contextmanager
+    def watch_model_load(self, prefix: str) -> Iterator[None]:
+        if not self.enabled:
+            yield
+            return
+        import comfy.model_management as mm
+
+        original = mm.load_models_gpu
+        loading = {"active": False}
+
+        def wrapped(*args, **kwargs):
+            if loading["active"]:
+                return original(*args, **kwargs)
+            loading["active"] = True
+            self.timing(f"{prefix} Model Load Start")
+            t0 = time.perf_counter()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                self.timing(f"{prefix} Model Load End", elapsed_s=time.perf_counter() - t0)
+                loading["active"] = False
+
+        mm.load_models_gpu = wrapped
+        try:
+            yield
+        finally:
+            mm.load_models_gpu = original
 
     def checkpoint(self, label: str) -> None:
         if not self.enabled:
@@ -328,12 +487,20 @@ class DirectorMemoryDebug:
         if not self.enabled or not self._lines:
             return ""
         copies = "\n".join(self._copy_lines) if self._copy_lines else "(no instrumented copy sites this run)"
+        timings = "\n".join(self._timing_lines) if self._timing_lines else "(no timing marks this run)"
         body = "\n".join(self._lines)
+        phase = ""
+        if self._phase_totals:
+            phase = "\n--- Phase totals ---\n" + "\n".join(
+                f"{k}: {v:.2f}s" for k, v in self._phase_totals.items()
+            )
         return (
-            "\n\n=== Memory debug (Phase 1, observe-only) ===\n"
-            f"memory_strategy={self.memory_strategy} (no behavior change in Phase 1)\n\n"
+            "\n\n=== Memory debug ===\n"
+            f"memory_strategy={self.memory_strategy}\n\n"
             "--- Checkpoints ---\n"
             f"{body}\n\n"
+            "--- Timing ---\n"
+            f"{timings}{phase}\n\n"
             "--- Instrumented tensor copies ---\n"
             f"{copies}\n"
         )

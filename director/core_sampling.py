@@ -8,6 +8,8 @@ so video/audio timesteps match the first pass.
 from __future__ import annotations
 
 import logging
+import time
+from contextlib import nullcontext
 from typing import Any, Callable
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core_sampling")
@@ -46,6 +48,8 @@ def sample_single_stage(
     phase_name: str = "sample",
     sigmas=None,
     apply_shift: bool = True,
+    memory_debug=None,
+    timing_prefix: str = "First",
 ):
     import comfy.sample
     import comfy.utils
@@ -55,6 +59,10 @@ def sample_single_stage(
     def notify(phase: str, value: float) -> None:
         if on_phase:
             on_phase(phase, value)
+
+    prefix = str(timing_prefix or "Sample")
+    if memory_debug is not None:
+        memory_debug.timing(f"{prefix} Sample Prepare Start")
 
     notify(phase_name, 0)
     model_use = model
@@ -109,29 +117,43 @@ def sample_single_stage(
             base_cb(step, x0, x, total_steps)
 
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-    # Manual sigmas still go through KSampler.sample (same path as first pass /
-    # schedule=steps). sample_custom skips SigmaShift wiring and can yield
-    # undecodable AV latents on H3.
-    samples = comfy.sample.sample(
-        model_use,
-        noise,
-        steps,
-        float(cfg),
-        sampler_name,
-        scheduler,
-        positive,
-        neg,
-        latent_image,
-        denoise=1.0 if sigma_list is not None else float(max(0.0, min(1.0, denoise))),
-        noise_mask=noise_mask,
-        callback=callback,
-        disable_pbar=disable_pbar,
-        seed=int(seed),
-        sigmas=sigma_list,
+    load_ctx = (
+        memory_debug.watch_model_load(prefix)
+        if memory_debug is not None
+        else nullcontext()
     )
+    if memory_debug is not None:
+        memory_debug.timing(f"{prefix} Sampler Start")
+    t_sample = time.perf_counter()
+    with load_ctx:
+        # Manual sigmas still go through KSampler.sample (same path as first pass /
+        # schedule=steps). sample_custom skips SigmaShift wiring and can yield
+        # undecodable AV latents on H3.
+        samples = comfy.sample.sample(
+            model_use,
+            noise,
+            steps,
+            float(cfg),
+            sampler_name,
+            scheduler,
+            positive,
+            neg,
+            latent_image,
+            denoise=1.0 if sigma_list is not None else float(max(0.0, min(1.0, denoise))),
+            noise_mask=noise_mask,
+            callback=callback,
+            disable_pbar=disable_pbar,
+            seed=int(seed),
+            sigmas=sigma_list,
+        )
+    if memory_debug is not None:
+        memory_debug.timing(f"{prefix} Sampler End", elapsed_s=time.perf_counter() - t_sample)
+        memory_debug.timing(f"{prefix} Sample Cleanup Start")
     out = latent.copy()
     out.pop("downscale_ratio_spacial", None)
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
     notify(phase_name, 1)
+    if memory_debug is not None:
+        memory_debug.timing(f"{prefix} Sample Cleanup End")
     return out
