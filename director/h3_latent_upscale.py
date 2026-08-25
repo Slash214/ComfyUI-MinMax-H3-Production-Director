@@ -317,6 +317,30 @@ def load_h3_latent_upscaler(name: str, device: torch.device, dtype: torch.dtype)
     return model.to(device=device, dtype=dtype)
 
 
+def clear_h3_latent_upscaler_cache() -> bool:
+    """Drop cached upscaler weights (CPU). Returns True when anything was cleared."""
+    global _MODEL_CACHE
+    if not _MODEL_CACHE:
+        return False
+    count = len(_MODEL_CACHE)
+    for model in _MODEL_CACHE.values():
+        try:
+            model.to("cpu")
+        except Exception:
+            pass
+    _MODEL_CACHE.clear()
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+    log.info("H3 latent upscaler cache cleared (%d entries)", count)
+    return True
+
+
 def _as_bcthw(samples: torch.Tensor) -> tuple[torch.Tensor, str]:
     """Director video latents are [B,C,T,H,W] or [C,T,H,W] (same as video_from_latent)."""
     if samples.ndim == 5:
