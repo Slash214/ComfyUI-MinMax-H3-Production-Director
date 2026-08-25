@@ -99,14 +99,31 @@ def torch_info() -> dict[str, Any]:
         if total:
             info["vram_total_mib"] = round(float(total) / (1024.0 * 1024.0), 1)
 
-    # Driver version via NVML (reuse memory_debug's initialised handle if any).
-    def _driver():
+    # Driver version via NVML. pynvml is often absent in ComfyUI's venv, so fall
+    # back to nvml.dll directly the same way memory_debug does.
+    def _driver_pynvml():
         import pynvml
 
         raw = pynvml.nvmlSystemGetDriverVersion()
         return raw.decode() if isinstance(raw, bytes) else str(raw)
 
-    info["driver"] = _safe(_driver)
+    def _driver_ctypes():
+        import ctypes
+
+        nvml = ctypes.WinDLL("nvml.dll")
+        nvml.nvmlInit_v2.restype = ctypes.c_int
+        if int(nvml.nvmlInit_v2()) != 0:
+            return None
+        buf = ctypes.create_string_buffer(80)
+        nvml.nvmlSystemGetDriverVersion.restype = ctypes.c_int
+        if int(nvml.nvmlSystemGetDriverVersion(buf, 80)) != 0:
+            return None
+        return buf.value.decode(errors="replace")
+
+    driver = _safe(_driver_pynvml)
+    if driver == _UNKNOWN and sys.platform == "win32":
+        driver = _safe(_driver_ctypes)
+    info["driver"] = driver
     return info
 
 
@@ -141,26 +158,63 @@ def comfy_kitchen_info() -> dict[str, Any]:
     info["present"] = True
     registry = getattr(ck, "registry", None)
 
-    # The registry API is not stable across ComfyUI versions — probe defensively.
-    for attr in ("is_disabled", "disabled"):
-        probe = getattr(registry, attr, None)
-        if probe is None:
-            continue
-        try:
-            disabled = probe("cuda") if callable(probe) else ("cuda" in probe)
-            info["cuda_backend"] = "disabled" if disabled else "enabled"
+    # ComfyUI logs one dict per backend at startup, e.g.
+    #   Found comfy_kitchen backend cuda: {'available': True, 'disabled': False,
+    #    'unavailable_reason': None, 'capabilities': [...]}
+    # Reproduce that lookup. The registry API is not stable across versions, so
+    # try the documented shapes in turn and fall back to the version gate.
+    backends: dict[str, Any] = {}
+    for attr in ("backends", "_backends", "registry"):
+        candidate = getattr(registry, attr, None) or getattr(ck, attr, None)
+        if isinstance(candidate, dict) and candidate:
+            backends = candidate
             break
-        except Exception:
-            continue
 
-    for attr, key in (("native_ops", "native_ops"), ("emulated_ops", "emulated_ops")):
-        value = getattr(registry, attr, None) or getattr(ck, attr, None)
-        if value is None:
-            continue
+    entry = backends.get("cuda") if backends else None
+    if entry is None:
+        for getter in ("get_backend", "backend_info", "info"):
+            probe = getattr(registry, getter, None)
+            if not callable(probe):
+                continue
+            try:
+                entry = probe("cuda")
+                break
+            except Exception:
+                continue
+
+    if isinstance(entry, dict):
+        disabled = bool(entry.get("disabled", False))
+        available = bool(entry.get("available", True))
+        info["cuda_backend"] = (
+            "enabled" if (available and not disabled) else "disabled"
+        )
+        caps = entry.get("capabilities") or []
+        info["native_ops"] = sorted(str(x) for x in caps)
+        if entry.get("unavailable_reason"):
+            info["detail"] = str(entry["unavailable_reason"])
+    elif entry is not None:
+        disabled = bool(getattr(entry, "disabled", False))
+        available = bool(getattr(entry, "available", True))
+        info["cuda_backend"] = (
+            "enabled" if (available and not disabled) else "disabled"
+        )
+        caps = getattr(entry, "capabilities", None) or []
         try:
-            info[key] = sorted(str(x) for x in (value() if callable(value) else value))
+            info["native_ops"] = sorted(str(x) for x in caps)
         except Exception:
-            continue
+            pass
+
+    if info["cuda_backend"] == _UNKNOWN:
+        for attr in ("is_disabled", "disabled"):
+            probe = getattr(registry, attr, None)
+            if probe is None:
+                continue
+            try:
+                disabled = probe("cuda") if callable(probe) else ("cuda" in probe)
+                info["cuda_backend"] = "disabled" if disabled else "enabled"
+                break
+            except Exception:
+                continue
 
     _apply_cuda_gate_verdict(info)
     return info
@@ -357,37 +411,66 @@ def core_scan_info() -> dict[str, Any]:
 
 
 def launch_flags_info() -> dict[str, Any]:
-    info: dict[str, Any] = {"vram_mode": _UNKNOWN, "flags": [], "pinned_memory": _UNKNOWN}
+    info: dict[str, Any] = {
+        "vram_mode": _UNKNOWN,
+        "flags": [],
+        "pinned_memory": _UNKNOWN,
+        "ram_total_mib": None,
+        "ram_avail_mib": None,
+        "advice": [],
+    }
+
+    # Live VRAM state, not the raw CLI flag — ComfyUI may override the flag.
+    def _vram_state():
+        import comfy.model_management as mm
+
+        state = getattr(mm, "vram_state", None)
+        return getattr(state, "name", None) or str(state)
+
+    info["vram_mode"] = _safe(_vram_state)
+
     try:
         import comfy.cli_args as cli
 
         args = getattr(cli, "args", None)
-        if args is None:
-            return info
-        for name in (
-            "normalvram",
-            "highvram",
-            "lowvram",
-            "novram",
-            "cpu",
-        ):
-            if getattr(args, name, False):
-                info["vram_mode"] = name
-        for name in (
-            "use_sage_attention",
-            "use_flash_attention",
-            "use_pytorch_cross_attention",
-            "disable_smart_memory",
-            "cache_none",
-            "fast",
-        ):
-            if getattr(args, name, False):
-                info["flags"].append(name)
-        disabled_pinned = getattr(args, "disable_pinned_memory", None)
-        if disabled_pinned is not None:
-            info["pinned_memory"] = "disabled" if disabled_pinned else "enabled"
+        if args is not None:
+            for name in (
+                "use_sage_attention",
+                "use_flash_attention",
+                "use_pytorch_cross_attention",
+                "disable_smart_memory",
+                "cache_none",
+                "fast",
+            ):
+                if getattr(args, name, False):
+                    info["flags"].append(name)
+            disabled_pinned = getattr(args, "disable_pinned_memory", None)
+            if disabled_pinned is not None:
+                info["pinned_memory"] = "disabled" if disabled_pinned else "enabled"
     except Exception:
         pass
+
+    # System RAM headroom. On a 20GB card the WDDM shared-memory pool and the
+    # pinned-memory budget both come out of system RAM, so a run can starve the
+    # OS long before it runs out of VRAM — that is what makes the desktop stall.
+    try:
+        from .memory_debug import _bytes_to_mib, _system_available_bytes
+
+        avail = _system_available_bytes()
+        if avail is not None:
+            info["ram_avail_mib"] = _bytes_to_mib(avail)
+        import psutil
+
+        info["ram_total_mib"] = _bytes_to_mib(psutil.virtual_memory().total)
+    except Exception:
+        pass
+
+    if info["pinned_memory"] == "enabled":
+        info["advice"].append(
+            "Pinned memory is on. It reserves a large fixed slice of system RAM "
+            "(ComfyUI prints the budget at startup). If a run ends with very "
+            "little AvailRAM, benchmark once with --disable-pinned-memory."
+        )
     return info
 
 
@@ -468,6 +551,13 @@ def format_report(data: dict[str, Any] | None = None) -> str:
     add(f"vram mode      : {launch['vram_mode']}")
     add(f"pinned memory  : {launch['pinned_memory']}")
     add(f"flags          : {', '.join(launch['flags']) or 'none detected'}")
+    if launch.get("ram_total_mib"):
+        add(
+            f"system RAM     : {launch['ram_avail_mib']:.0f} / "
+            f"{launch['ram_total_mib']:.0f} MiB available"
+        )
+    for tip in launch.get("advice") or []:
+        add(f"  note: {tip}")
 
     return "\n".join(lines)
 

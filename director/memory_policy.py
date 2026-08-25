@@ -62,6 +62,82 @@ def soft_release_workspace(*, strategy: str, reason: str) -> None:
     log.debug("MiniMax H3 Director balanced soft release (%s)", reason)
 
 
+def release_text_encoder(clip, *, strategy: str) -> str:
+    """Drop the H3 text encoder once conditioning is done. Returns a report note.
+
+    Measured on a 20GB card: at the moment first sampling starts, the Qwen3-VL
+    text encoder is still fully resident (~15GB) while the 20GB H3 diffusion
+    model is being staged. The two cannot both fit, so DynamicVRAM pushes ~15GB
+    into WDDM shared memory — i.e. system RAM over PCIe — and every sampling step
+    pays for it. The conditioning tensors are already computed at this point, so
+    the encoder is dead weight.
+
+    Only releases the text encoder. VAEs and the diffusion model are untouched,
+    and no generation value changes — this is purely a residency decision.
+    ``standard`` keeps the previous behaviour exactly.
+    """
+    if not is_balanced_strategy(strategy) or clip is None:
+        return ""
+    try:
+        import comfy.model_management as mm
+    except Exception as exc:
+        log.debug("text encoder release skipped (%s)", exc)
+        return ""
+
+    patcher = getattr(clip, "patcher", None) or clip
+    loaded = getattr(mm, "current_loaded_models", None)
+    if loaded is None:
+        return ""
+
+    freed_mib = 0.0
+    released = 0
+    for entry in list(loaded):
+        model = getattr(entry, "model", None)
+        if model is None:
+            continue
+        # Match the wired CLIP first; fall back to the H3 TE class name so a
+        # cloned patcher is still recognised.
+        inner = getattr(model, "model", None)
+        name = f"{type(model).__name__}{type(inner).__name__ if inner is not None else ''}"
+        is_te = model is patcher or "TEModel" in name or "MiniMaxH3TE" in name
+        if not is_te:
+            continue
+        size = 0.0
+        for attr in ("model_loaded_memory", "loaded_size", "model_size"):
+            probe = getattr(entry, attr, None)
+            try:
+                value = probe() if callable(probe) else probe
+            except Exception:
+                continue
+            if isinstance(value, (int, float)) and value > 0:
+                size = float(value) / (1024.0 * 1024.0)
+                break
+        try:
+            unload = getattr(entry, "model_unload", None)
+            if callable(unload):
+                unload()
+            loaded.remove(entry)
+            released += 1
+            freed_mib += size
+        except Exception as exc:
+            log.debug("text encoder entry unload failed: %s", exc)
+
+    if not released:
+        return ""
+    gc.collect()
+    try:
+        mm.soft_empty_cache()
+    except Exception:
+        pass
+    note = (
+        f"balanced: released text encoder after conditioning "
+        f"({released} entr{'y' if released == 1 else 'ies'}, ~{freed_mib:.0f}MiB) "
+        "— frees VRAM for sampling; conditioning tensors already computed"
+    )
+    log.info("MiniMax H3 Director: %s", note)
+    return note
+
+
 def maybe_clear_upscaler_cache(strategy: str) -> bool:
     if not is_balanced_strategy(strategy):
         return False

@@ -76,6 +76,7 @@ from .memory_policy import (
     can_defer_pre_refine_decode,
     gpu_refine_model_recommendation,
     is_balanced_strategy,
+    release_text_encoder,
     run_end_policy,
     segment_vram_cleanup,
     soft_release_workspace,
@@ -830,6 +831,13 @@ def execute_director_plan_core(
                 enabled=True,
                 unload_models=seg_total > 1,
             )
+
+        # Conditioning is done — the ~15GB text encoder is dead weight from here
+        # on, and on a 20GB card it is what pushes the diffusion model into WDDM
+        # shared memory. balanced_20gb only; standard keeps the old residency.
+        te_note = release_text_encoder(clip, strategy=mem.memory_strategy)
+        if te_note:
+            reports.append(te_note)
 
         def _report_sample_phase(phase: str, value: float) -> None:
             report_director_progress(

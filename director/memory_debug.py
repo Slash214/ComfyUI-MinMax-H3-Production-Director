@@ -433,17 +433,22 @@ def latent_token_estimate(latent: Any) -> dict[str, Any]:
                 if key == "samples" or not torch.is_tensor(value):
                     continue
                 info["extra"].append(f"{key}={tuple(int(x) for x in value.shape)}")
-        if len(shape) == 5:  # [B, C, T, H, W]
-            _b, c, t, h, w = shape
-            info["video_tokens"] = int(t) * int(h) * int(w)
+
+        # Token count = every dim except batch and channels. H3's AV latent is
+        # not always [B,C,T,H,W] — packed layouts show up as rank 3 and 4 too —
+        # so derive it generically instead of pattern-matching one rank.
+        if len(shape) >= 3:
+            info["channels"] = int(shape[1])
+            tokens = 1
+            for dim in shape[2:]:
+                tokens *= int(dim)
+            info["video_tokens"] = tokens
+        elif len(shape) == 2:  # [tokens, features] — already packed
+            info["channels"] = int(shape[1])
+            info["video_tokens"] = int(shape[0])
+        if info["video_tokens"]:
             # H3's first FFN projection intermediate is ~56 KiB per token.
             info["mib_bf16"] = round(info["video_tokens"] * 56.0 / 1024.0, 1)
-            info["channels"] = int(c)
-        elif len(shape) == 4:  # [B, C, H, W]
-            _b, c, h, w = shape
-            info["video_tokens"] = int(h) * int(w)
-            info["mib_bf16"] = round(info["video_tokens"] * 56.0 / 1024.0, 1)
-            info["channels"] = int(c)
     except Exception:
         pass
     return info
