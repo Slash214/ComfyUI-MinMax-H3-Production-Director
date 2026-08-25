@@ -438,6 +438,7 @@ def apply_segment_refine(
     trim_frames: int = 0,
     on_pass: RefinePassCallback | None = None,
     memory_debug=None,
+    memory_strategy: str = "standard",
 ) -> tuple[dict, str]:
     """Run optional refine/upscale second sample. Never raises — returns first-pass on failure.
 
@@ -575,6 +576,8 @@ def apply_segment_refine(
                 "Unwire refine_model so the first-pass UNET (Turbo+Sage) is reused, "
                 "or use a matching second-pass UNET."
             )
+        if memory_debug is not None:
+            memory_debug.timing("Refine Prepare Start")
         # Pass 1 samples after optional upscale; later passes are same-canvas refine only.
         for i in range(n_passes):
             log.info(
@@ -609,9 +612,13 @@ def apply_segment_refine(
                 phase_name="refine",
                 sigmas=sigma_list,
                 apply_shift=True,
+                memory_debug=memory_debug if memory_debug is not None and memory_debug.enabled else None,
+                timing_prefix="Refine",
             )
             last_ok = work
             if memory_debug is not None and i == 0:
+                memory_debug.timing("Refine Cleanup Start")
+                memory_debug.timing("Refine Cleanup End")
                 memory_debug.checkpoint("After Refine Sampling")
             if on_pass is not None:
                 try:
@@ -625,6 +632,10 @@ def apply_segment_refine(
                     )
         if on_phase:
             on_phase("refine", 1)
+        from .memory_policy import is_balanced_strategy, soft_release_workspace
+
+        if is_balanced_strategy(memory_strategy):
+            soft_release_workspace(strategy=memory_strategy, reason="post_refine")
         return work, "refine " + ", ".join(note_parts)
     except Exception as exc:
         log.warning(
