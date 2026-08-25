@@ -597,7 +597,15 @@ def apply_segment_refine(
                 # reflects what attention and the feed-forward actually see.
                 probe = getattr(memory_debug, "probe", None)
                 if callable(probe):
-                    probe("Before Refine Sampling", latent=work, models=True)
+                    try:
+                        probe(
+                            "Before Refine Sampling",
+                            latent=work,
+                            models=True,
+                            model=refine_model,
+                        )
+                    except TypeError:  # older probe() without model=
+                        probe("Before Refine Sampling", latent=work, models=True)
                 else:
                     memory_debug.checkpoint("Before Refine Sampling")
             work = sample_single_stage(

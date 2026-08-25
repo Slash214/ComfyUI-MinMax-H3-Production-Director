@@ -868,7 +868,7 @@ def execute_director_plan_core(
 
         # Token count + resident model dump for the first pass, so the refine
         # numbers below have a baseline to be compared against.
-        mem.probe("First Sampling (pre)", latent=latent, models=True)
+        mem.probe("First Sampling (pre)", latent=latent, models=True, model=model)
         samples = sample_single_stage(
             model=model,
             positive=positive,

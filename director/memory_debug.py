@@ -404,6 +404,42 @@ def loaded_models_brief() -> list[str]:
     return out
 
 
+def model_fingerprint(model: Any) -> str:
+    """Identify which checkpoint a sampling pass actually used.
+
+    ComfyUI logs "Model MiniMaxH3 prepared for dynamic VRAM loading. NNNNMB
+    Staged" without naming the file, and the staged figure varies with free
+    VRAM — so it cannot be used to tell checkpoints apart. Parameter count and
+    total weight bytes can: on MiniMax H3 the W4A8-mixed and INT8-ConvRot
+    checkpoints differ by several GB, which is exactly the confusion this line
+    is here to prevent.
+    """
+    try:
+        inner = getattr(model, "model", None)
+        target = getattr(inner, "diffusion_model", None) or inner or model
+        params = 0
+        weight_bytes = 0
+        dtypes: dict[str, int] = {}
+        for tensor in getattr(target, "parameters", lambda: [])():
+            if not torch.is_tensor(tensor):
+                continue
+            n = int(tensor.numel())
+            params += n
+            weight_bytes += n * int(tensor.element_size())
+            key = str(tensor.dtype).replace("torch.", "")
+            dtypes[key] = dtypes.get(key, 0) + n
+        if params == 0:
+            return f"{type(target).__name__} (no parameters visible)"
+        top = sorted(dtypes.items(), key=lambda kv: -kv[1])[:3]
+        dtype_text = ", ".join(f"{k}:{v / 1e6:.0f}M" for k, v in top)
+        return (
+            f"{type(target).__name__} | params={params / 1e9:.2f}B | "
+            f"weights={weight_bytes / (1024.0 ** 3):.2f}GiB | {dtype_text}"
+        )
+    except Exception as exc:
+        return f"fingerprint failed ({type(exc).__name__})"
+
+
 def latent_token_estimate(latent: Any) -> dict[str, Any]:
     """Estimate the packed video token count from a latent dict or tensor.
 
@@ -574,7 +610,14 @@ class DirectorMemoryDebug:
         self._lines.append(line)
         log.info(line)
 
-    def probe(self, label: str, *, latent: Any = None, models: bool = False) -> None:
+    def probe(
+        self,
+        label: str,
+        *,
+        latent: Any = None,
+        models: bool = False,
+        model: Any = None,
+    ) -> None:
         """Checkpoint plus optional latent token count and resident model dump.
 
         Used at the sampling boundaries so a log can answer, without guesswork:
@@ -584,6 +627,10 @@ class DirectorMemoryDebug:
         if not self.enabled:
             return
         self.checkpoint(label)
+        if model is not None:
+            line = f"[Model] {label} | {model_fingerprint(model)}"
+            self._lines.append(line)
+            log.info(line)
         if latent is not None:
             info = latent_token_estimate(latent)
             if info.get("video_tokens"):
