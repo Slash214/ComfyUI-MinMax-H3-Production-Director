@@ -183,10 +183,9 @@ def _build_gen_source_clips(
         if frame_count <= 0:
             continue
         if submode == "gen_blank":
-            # t2v/r2v duration is carried by the segment range. These tasks do
-            # not consume a source video, so allocating N full-resolution gray
-            # frames only multiplies host RAM usage when the list is later
-            # concatenated and cloned into SegmentPlan instances.
+            # t2v/r2v duration lives on the segment range. Do not allocate
+            # (N,H,W,3) gray canvases — they are unused as first_frame / <Video 1>
+            # and concatenating them into source_video OOMs on long jobs.
             continue
         ref = _resolve_gen_image_ref(seg_data, edit_mode=edit_mode, global_block=global_block)
         if ref is None:
@@ -232,11 +231,7 @@ def _build_gen_source_video(
     ref_max_size: int,
 ) -> torch.Tensor:
     if submode == "gen_blank":
-        return torch.full(
-            (max(1, len(ranges)), 16, 16, 3),
-            0.5,
-            dtype=torch.float32,
-        )
+        return torch.full((max(1, len(ranges)), 16, 16, 3), 0.5, dtype=torch.float32)
     return cat_frames_variable_size(
         _build_gen_source_clips(
             ranges,
@@ -352,12 +347,11 @@ def build_gen_director_plan(
 
     if submode == "gen_blank":
         source_clips = []
-        # Index-only placeholder. Spatial dimensions come from plan.width and
-        # plan.height; blank-generation segments keep source_clip=None.
+        # Index-only placeholder. Spatial size comes from plan.width/height;
+        # t2v/r2v segments keep source_clip=None so the executor does not
+        # treat these frames as a real source clip.
         source_video = torch.full(
-            (max(1, len(segment_ranges)), 16, 16, 3),
-            0.5,
-            dtype=torch.float32,
+            (max(1, len(segment_ranges)), 16, 16, 3), 0.5, dtype=torch.float32
         )
     else:
         source_clips = _build_gen_source_clips(
@@ -371,18 +365,10 @@ def build_gen_director_plan(
             output_mode=out_mode,
             ref_max_size=ref_max,
         )
-        attach_source_clips = (
-            is_prompt_batch_timeline(timeline, task_key)
-            and task_key in ("i2i", "i2v")
-        )
+        attach_source_clips = is_prompt_batch_timeline(timeline, task_key) and task_key in ("i2i", "i2v")
         if attach_source_clips:
-            # Placeholder timeline index only; spatial data comes from each
-            # segment's source_clip.
-            source_video = torch.full(
-                (len(source_clips), 16, 16, 3),
-                0.5,
-                dtype=torch.float32,
-            )
+            # Placeholder timeline index only — spatial data comes from each segment's source_clip.
+            source_video = torch.full((len(source_clips), 16, 16, 3), 0.5, dtype=torch.float32)
         else:
             source_video = cat_frames_variable_size(source_clips)
 

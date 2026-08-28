@@ -308,10 +308,59 @@ def attention_info() -> dict[str, Any]:
         )
     else:
         info["sol_attn_note"] = (
-            f"sm_{sm[0]}{sm[1]} is below SM89 — Sol-Attn Triton kernels need TMA "
-            "(SM90+) or the SM89 pointer twins. Sparse attention will fall back "
-            "to dense; do not expect a speedup from installing it."
+            f"sm_{sm[0]}{sm[1]} is below SM89 — sparse attention falls back to "
+            "dense here; installing it buys nothing."
         )
+    return info
+
+
+# ---------------------------------------------------------------------------
+# quantisation paths — the thing that actually matters on Ampere
+# ---------------------------------------------------------------------------
+
+# Tensor-core support by compute capability. A weight format without hardware
+# support still *runs*, but on an emulated path that is far slower than the
+# quantisation saving is worth.
+_FP8_MIN_SM = (8, 9)    # Ada and up
+_FP4_MIN_SM = (10, 0)   # Blackwell datacenter and up
+
+
+def quant_paths_info() -> dict[str, Any]:
+    """Which weight quantisations this GPU can run in hardware.
+
+    ComfyUI prints a per-model ``Native ops: ... emulated ops: ...`` line only
+    once a checkpoint is loaded, which is too late to pick a checkpoint. The
+    compute capability decides it up front, so report it at startup instead.
+    """
+    info: dict[str, Any] = {"native": [], "emulated": [], "advice": ""}
+    sm = torch_info().get("sm")
+    if sm is None:
+        info["advice"] = "GPU compute capability unknown"
+        return info
+
+    # INT8/INT4 tensor cores exist from Turing onward; H3's convrot kernels
+    # target them directly.
+    info["native"] = ["int8", "int4 / convrot_w4a4", "w4a8_int8", "bfloat16"]
+
+    if sm < _FP8_MIN_SM:
+        info["emulated"].append("float8_e4m3fn / float8_e5m2 (needs SM89+)")
+    else:
+        info["native"].append("float8")
+    if sm < _FP4_MIN_SM:
+        info["emulated"].append("nvfp4 / mxfp8 (needs SM100+)")
+    else:
+        info["native"].append("nvfp4")
+
+    if info["emulated"]:
+        info["advice"] = (
+            f"sm_{sm[0]}{sm[1]} has INT8 tensor cores but no hardware for the "
+            "formats listed as emulated. On this GPU prefer int8-convrot "
+            "checkpoints; an fp8- or nvfp4-quantised file will dequantise in "
+            "software and can be slower than the larger int8 build despite "
+            "using less memory."
+        )
+    else:
+        info["advice"] = "All common H3 weight formats have hardware support here."
     return info
 
 
@@ -483,6 +532,7 @@ def collect() -> dict[str, Any]:
     return {
         "torch": torch_info(),
         "kitchen": comfy_kitchen_info(),
+        "quant": quant_paths_info(),
         "attention": attention_info(),
         "layout": packed_layout_info(),
         "core": core_scan_info(),
@@ -523,12 +573,23 @@ def format_report(data: dict[str, Any] | None = None) -> str:
         add(f"detail         : {k['detail']}")
     add("")
 
+    q = d["quant"]
+    add("--- Weight formats this GPU runs in hardware ---")
+    add(f"native         : {', '.join(q['native']) or 'unknown'}")
+    if q["emulated"]:
+        add(f"EMULATED       : {', '.join(q['emulated'])}")
+    add(f"note           : {q['advice']}")
+    add("")
+
     add("--- Attention ---")
     add(f"backend        : {a['backend']}")
     add(f"SageAttention  : {'available' if a['sage_available'] else 'not installed'}")
     add(f"Triton         : {a['triton_version']}")
-    add(f"Sol-Attn packs : {', '.join(a['sol_attn_packs']) or 'none installed'}")
-    add(f"Sol-Attn ready : {a['sol_attn_eligible']} — {a['sol_attn_note']}")
+    # Sol-Attn only earns a line when it could actually do something here, or
+    # when a pack is installed that the user may be expecting to work.
+    if a["sol_attn_eligible"] or a["sol_attn_packs"]:
+        add(f"Sol-Attn packs : {', '.join(a['sol_attn_packs']) or 'none installed'}")
+        add(f"Sol-Attn ready : {a['sol_attn_eligible']} — {a['sol_attn_note']}")
     add("")
 
     add("--- H3 PackedLayout ownership (continuity) ---")

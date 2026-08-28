@@ -321,9 +321,9 @@ def _classify_layout_owner() -> str | None:
         return "ours"
     if getattr(init, "_h3_motion_context_layout_patch", False):
         return "foreign_mc"
-    # SolAttn_triton only observes H3 PackedLayout construction (Morton token
-    # reordering). Its wrapper can safely stay underneath Director's continuity
-    # wrapper. Unknown wrappers are still rejected by the checks below.
+    # SolAttn_triton only observes H3 PackedLayout construction. Its exact
+    # wrapper can safely remain underneath Director's continuity wrapper.
+    # Unknown wrappers are still rejected by the checks below.
     module = str(getattr(init, "__module__", "")).replace("\\", "/")
     qualname = getattr(init, "__qualname__", "")
     if (

@@ -1,199 +1,288 @@
-# ComfyUI MiniMax H3 Director
+# MiniMax H3 Production Director
 
-基于 **ComfyUI 官方 MiniMax-H3** 的多段音视频导演台插件。仓库地址：[AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director)
+> **这是个人二开分支，不是官方版本。**
+>
+> 上游原仓库：**[AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director)**
+>
+> **如果你只是想正常使用这个插件，请直接去上游安装。** 上游更新更勤、社区支持更好、功能更完整。
+>
+> 这个分支只为一类机器服务：**20GB 显存的 Ampere 卡（RTX 3080 20GB / 3090）+ Windows**。
+> 改动带有很强的针对性，对别的配置不一定更好，也可能更差。
 
-**English** → [README_EN.md](README_EN.md)
+---
 
-![MiniMaxH3Director 工作流截图](docs/screenshot.png)
+## 20GB Ampere 面对的是什么
 
-## 功能介绍
+原插件在 24GB 以上、Ada/Blackwell 架构上跑得很顺。**RTX 30 系 + 20GB 会同时撞上两堵墙**，
+而这两堵墙都不是「调参数」能绕过去的。
 
-**MiniMaxH3Director** 是面向长视频、多段生成的 MiniMax H3 导演台节点，把分段计划、条件编码、采样解码和导出整合在一个节点里。底层走官方 `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` + `MiniMaxH3SigmaShift` + `KSampler` + AV 分离解码链路，原生输出立体声音频。
+### 墙一：显存装不下，Windows 会偷偷用内存顶上
 
-### 核心能力
+H3 的一次生成要同时用到：
 
-| 功能 | 说明 |
-|------|------|
-| **多段时间轴** | 节点内上传视频，支持切分、均分、智能分镜分割（PySceneDetect）、追加；分割点可选中删除；可视化时间轴预览每段范围与缩略图 |
-| **多任务模式** | `task_type`：`t2v`（文生视频）、`i2v`（图生视频）、`fl2v`（首尾帧生视频）、`r2v`（参考主体生视频 / 素材组）、`v2v`（视频转视频）、`rv2v`（参考素材改视频） |
-| **首尾帧 (fl2v)** | 独立首尾帧时间轴：多组关键帧、「添加一组」上传首帧和/或尾帧（官方支持只传尾帧）；拖缘调时长；提示词写中间运动；支持「选择运行」只跑部分组 |
-| **参考素材组 (r2v)** | fl2v 式分组 UI：上方「公共参数」共享参考图/音频与公共提示词（与每组提示词拼接）；每组可再挂图片1–9 / 音频1–3 / 视频1–3；提示词用 `<Picture N>` / `<Video K>` / `<Audio J>`（或 `@` 引用）；时间轴预览与选中状态同步 |
-| **源视频编辑 (v2v / rv2v)** | Bernini 风格源视频时间轴；每段源画面自动绑定 `<Video 1>`；`rv2v` 另可挂参考图（图片1–9）与参考音频（音频1–3） |
-| **选择运行** | 开启后只采样勾选的片段/素材组；未勾选段可用缓存或源画面填充（全部导出时） |
-| **外部多组接线** | `Director Group (Image to Video)` / `(Reference to Video)` + `Groups Combine`；连入导演台 `i2v_groups` / `r2v_groups` 后外部优先覆盖 UI 素材，仍支持跑批与选择运行 |
-| **原生立体声音频** | 与画面同次采样生成；`v2v`/`rv2v` 可选生成声音 / 使用原声 / 静音 |
-| **段间引导** | 默认关闭；多段 `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v` 时可开启，将上一段生成结果的末尾运动（及生成音频）钉入下一段采样再裁掉前缀。上下文帧数：5 / 22 / 39 / 56，**默认推荐为 22**。**感谢 [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) 提供的实现思路** |
-| **二采 / 放大 (Refine)** | 外接 **MiniMax H3 Director Refine** 到导演台 `refine` 口。未接线 = 原来的单次采样。`refine` = 同分辨率精修；`upscale` = 先放大到目标画布再按 SIGMAS 二采（像素插值 / RTX VSR / H3 latent）；`latent_upscale` = 只放大 H3 latent、不二采。`passes` 可多次精修（upscale 只放大一次）。可选接 `refine_model` 换二采 UNET。`confirm_first_pass` 可先只跑一采、确认后同 seed 再 Queue 才二采。`images` 为二采后成片，`images_pre_refine` 为一采（放大前）画面 |
-| **运行报告** | `report` 口输出分段计划、每段任务摘要 |
+| 组件 | 规模 |
+|---|---|
+| Qwen3-VL 文本编码器 | ~15 GB |
+| H3 扩散模型 | ~20 GB |
+| Video VAE | ~5 GB |
+| Audio VAE | ~0.6 GB |
 
-### 输入 / 输出
+**加起来 40GB，卡只有 20GB。**
 
-**输入：** `model` → `video_vae` → `audio_vae` → `clip`  
-**可选：** `i2v_groups`（Image to Video 多组）/ `r2v_groups`（Reference to Video 多组）/ `refine`（`MiniMax H3 Director Refine`）
+装不下的部分会被 WDDM 挪进 **Shared GPU Memory**——那本质上是系统内存，走 PCIe 访问。
+生成还能跑完，但**整台机器卡顿**。
 
-**输出：** `images` → `audio` → `fps` → `frame_count` → `source_images` → `report` → `images_pre_refine`
+更麻烦的是**你看不见它**：NVML 只报专用显存，`nvidia-smi` 看着一切正常。
+本分支实测过一次跑完之后，64GB 内存只剩 3.1GB，共享显存吃掉了 24.7GB。
 
-> CLIP Loader 的 **type 必须选 `minimax`**（Qwen3-VL）。  
-> `t2v` / `i2v` / `fl2v` 用 **fl2va** UNET；`r2v` / `v2v` / `rv2v` 用 **ref2va** UNET。
+### 墙二：sm_86 没有 FP8 / FP4 硬件
 
-## 依赖
+| 权重格式 | sm_86（30 系） | 说明 |
+|---|---|---|
+| int8 / int4-convrot | **原生** | H3 的 convrot kernel 直接打张量核 |
+| w4a8_int8 | **原生** | |
+| bfloat16 | **原生** | |
+| float8_e4m3fn / e5m2 | **模拟** | 需要 SM89+（40 系起） |
+| nvfp4 / mxfp8 | **模拟** | 需要 SM100+ |
 
-请将 **ComfyUI** 升级到 **v0.30.0** 及以上（含官方 MiniMax H3 节点：[PR #15224](https://github.com/comfyanonymous/ComfyUI/pull/15224)、[PR #15228](https://github.com/comfyanonymous/ComfyUI/pull/15228)）。
+**模拟路径 = 在软件里反量化。** 一个 fp8 量化的权重虽然文件更小，
+在 30 系上可能比更大的 int8 版本还慢。
 
-可选：`scenedetect`（智能分割）、`opencv-python-headless`（源视频解码）、`imageio-ffmpeg`（原声抽取）——见 `requirements.txt`。  
-Refine 的 `nvidia_rtx_vsr` 另需 NVIDIA GPU，可 `pip install nvidia-vfx --extra-index-url https://pypi.nvidia.com`（不是硬依赖）。
+这条直接决定了**你该选哪个 checkpoint**，而 ComfyUI 要等模型加载完才会打印
+`Native ops / emulated ops`——那时候已经晚了。本分支在启动时就告诉你。
+
+### 顺带：稀疏注意力这条路在 30 系是关着的
+
+社区的 Sol-Attn 系列（sparse attention）需要 SM89+ 的 TMA 或专用 pointer kernel。
+**sm_86 装了只会回退到 dense，白折腾。** 本分支不在这上面花力气，
+诊断里也只在真能用的卡上才提这件事。
+
+**30 系唯一确实有效的注意力加速是 SageAttention** —— 实测一采 −34.5%。
+
+---
+
+## 实测结果
+
+固定场景：单段 R2V，124 帧 @24fps，一采 352×608，二采 768×1376，20 步，固定 seed，**冷启动**。
+
+| | 起点 | 现在 | 变化 |
+|---|---|---|---|
+| **总时长** | 373.1s | **319.6s** | **−14.3%** |
+| 一采 s/it | 6.84 | **4.48** | −34.5% |
+| 二采 s/it | 43.39 | 41.64 | −4.0% |
+| 一采时 GPUShared | 15,380 MiB | **< 1,000 MiB** | −93% |
+
+**画质：人工同 seed 比对，无可见差异。**
+
+### 收益从哪来
+
+**1. SageAttention 之前根本没开。**
+工作流里挂着 `Patch Sage Attention KJ`，但 `sage_attention = disabled`——节点在那儿什么也没做。
+改成 `auto` 后一采从 6.84 降到 4.48 s/it。
+
+这不是本分支的代码功劳，是**诊断查出来的配置问题**。但它恰好说明了为什么这个分支
+要先做诊断再做优化：**跑了几个月的工作流里，最大的一块提速一直躺在一个下拉框里。**
+
+**2. 文本编码器在一采期间白占 15GB 显存。**
+conditioning 算完之后 Qwen3-VL 就没用了，但它一直留到运行结束。
+一采要 stage 20GB 的扩散模型——20GB 的卡装不下 35GB，于是 15GB 进了共享显存。
+
+本分支在 conditioning 完成后**定向释放文本编码器**（只放它，VAE 和扩散模型不动）。
+conditioning 张量此时已经算完，所以**不改变任何生成数值**。
+
+**3. 一采该用 int8_convrot，不是 W4A8。**
+实测 `ref2va_pruned_int8_convrot` 比 `ref2va_pruned_w4a8_mixed` **快 21%**
+（4.48 vs 5.69 s/it），而且画质更好——这正是「墙二」的直接后果。
+
+**W4A8 当一采模型是双输。** 当二采模型仍然合理：低 denoise 精修，且省显存。
+
+---
+
+## 推荐配置（20GB Ampere）
+
+| 项 | 值 | 理由 |
+|---|---|---|
+| 一采 UNET | `minimax_h3_ref2va_pruned_int8_convrot` | 原生 kernel，最快也最好 |
+| 二采 UNET | `minimax_h3_ref2va_pruned_w4a8_mixed` | 低 denoise 精修，省显存 |
+| Patch Sage Attention KJ | **`auto`**（一采、二采都要） | −34.5%，无画质代价 |
+| `allow_compile` | `false` | 除非你同时用 TorchCompile，否则无意义 |
+| `memory_strategy` | `balanced_20gb` | 释放 TE，共享显存降 93% |
+| `memory_debug` | 平时 `false` | 排查时才开 |
+
+> 两个 Sage 节点**都要改**。只改主路径的话二采吃不到，日志里 `Using sage attention mode: auto`
+> 会只出现一次而不是两次。
+
+---
+
+## 相对上游的改动
+
+全部是**加法**——新增文件 + 少量调用点，尽量不重写上游文件，方便持续合并上游更新。
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `director/env_diagnostics.py` | **新增** | 环境体检（只读） |
+| `director/memory_policy.py` | **新增** | `balanced_20gb` 内存策略 |
+| `director/memory_debug.py` | **新增** | RAM / VRAM / 共享显存 / 耗时诊断 |
+| `benchmarks/` | **新增** | 实测记录与跑测协议 |
+| `nodes/director_common.py` | 改动 | 加 `memory_strategy`、`memory_debug` 两个控件 |
+| `director/executor_core.py` | 改动 | 诊断探针 + TE 释放调用点 |
+| `director/refine_sampling.py` | 改动 | 二采前一个探针 |
+
+**没有改动的部分**：段间引导逻辑、采样数学、conditioning、导出、前端 UI、所有任务模式。
+**上游的功能一个没少**，并持续合并上游更新。
+
+### 新增控件
+
+节点「性能」组里多了两个。
+
+**`memory_strategy`**
+
+| 值 | 行为 |
+|---|---|
+| `standard` | **与上游完全一致**，不做任何额外释放 |
+| `balanced_20gb` | conditioning 后释放 TE、deferred pre-refine 解码、RAM 感知清理 |
+| `aggressive_lowmem` | 预留位，当前等同 `standard` |
+
+默认 `standard`——**上游行为是默认行为**，新策略必须显式开启，出问题随时切回来复现。
+
+**`memory_debug`**（默认关）
+
+开启后在控制台和节点 `report` 输出诊断。关闭时所有探针直接 return，零开销。
+
+---
+
+## 诊断能看到什么
+
+### 启动时的环境体检
+
+插件加载时自动输出一次。**只读**——不加载模型、不改 ComfyUI 状态、不写任何文件。
+
+```
+=== MiniMax H3 Director — Environment Report ===
+
+--- Hardware / torch ---
+GPU            : NVIDIA GeForce RTX 3080 (sm_86)
+VRAM           : 20480 MiB
+Driver         : 591.86
+torch          : 2.12.1+cu130 / CUDA 13.0
+
+--- comfy_kitchen (H3 int8-convrot kernels) ---
+backend        : enabled
+VERDICT        : OK — H3 quantised CUDA kernels are live
+
+--- Weight formats this GPU runs in hardware ---
+native         : int8, int4 / convrot_w4a4, w4a8_int8, bfloat16
+EMULATED       : float8_e4m3fn / float8_e5m2 (needs SM89+)
+                 nvfp4 / mxfp8 (needs SM100+)
+note           : sm_86 有 INT8 张量核但没有 fp8/fp4 硬件，优先选 int8-convrot 权重
+
+--- Attention ---
+backend        : attention_pytorch
+SageAttention  : available
+
+--- H3 PackedLayout ownership (continuity) ---
+owner          : stock
+
+--- Core regression scan ---
+! L168: v = v.clone()  <- full value-tensor clone in the H3 attention path
+
+--- ComfyUI launch ---
+vram mode      : NORMAL_VRAM
+pinned memory  : enabled
+system RAM     : 57153 / 65393 MiB available
+```
+
+它专门在查这几个坑：
+
+- **`comfy_kitchen` CUDA 后端是否被静默禁用。** ComfyUI 在 `comfy/quant_ops.py` 里按
+  `torch.version.cuda >= 13` 卡这个后端。不满足就只打一行 warning 然后走模拟路径——
+  H3 的 int8-convrot 专用 kernel 全部失效，[实测慢 2.17 倍](https://note.com/tank_ai/n/nab26edd4ab96)。
+  **ComfyUI 便携版自带的 PyTorch 不会随核心更新**，很容易长期处于这个状态而不自知。
+- **这张卡哪些权重格式是原生的。** 见上面「墙二」。
+- **`PackedLayout` 被谁占了。** 段间引导会 patch 它，遇到不认识的第三方 wrapper 会直接报错。
+- **core 里的已知高显存写法。**
+
+### 运行时探针（`memory_debug = true`）
+
+```
+[Baseline] COLD start — timings are comparable to other cold runs.
+[Memory]   Run Start | RSS=... | AvailRAM=... | NVMLUsed=... | GPUShared=... | Δt=...
+[Model]    First Sampling (pre) | MiniMaxH3Model | tensors=... | stored=...GiB
+[Resident] First Sampling (pre) | MiniMaxH3TEModel_ 14980MiB @cuda:0; ...
+[Tokens]   Before Refine Sampling | latent=(...) | video_tokens=... | ffn_intermediate~...MiB
+```
+
+- **`GPUShared`** —— Windows「GPU Process Memory」性能计数器。
+  **NVML 看不到 WDDM 溢出，这个能看到。** 这是整套诊断里最关键的一个数。
+- **`AllocRetries` / `CudaOOMs`** —— torch 分配器压力计数，溢出的进程内指纹
+- **`[Resident]`** —— 每个关键时刻显存里到底住着什么
+- **`[Model]`** —— 每一遍采样实际用的是哪个 checkpoint（ComfyUI 的日志不说）
+- **`[Baseline]`** —— 自动判定冷/热启动。**热启动的计时不可与冷启动比较**，会明确警告
+
+最后一条是踩出来的：热启动因为权重还在内存里，能虚快 12%，
+拿它跟冷启动比会得出完全相反的结论。
+
+---
 
 ## 安装
 
-### 方法一：手动安装（标准方式）
-
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director.git
-
-pip install -r ComfyUI_MiniMaxH3_Director/requirements.txt
+git clone https://github.com/Slash214/ComfyUI-MinMax-H3-Production-Director.git
+pip install -r ComfyUI-MinMax-H3-Production-Director/requirements.txt
 ```
 
-重启 ComfyUI。
+依赖、模型、工作流、各任务模式的用法与上游完全一致，
+**请参照[上游 README](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director)**。
+本仓库不重复维护那部分文档，以免与上游脱节。`example_workflows/` 下的示例同样来自上游。
 
-### 方法二：ComfyUI Manager
+### 本机验证环境
 
-1. 打开 **ComfyUI Manager**
-2. 选择 **Install via Git URL**
-3. 填入 `https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director.git` 并安装
-4. 重启 ComfyUI
+```
+GPU        : RTX 3080 20GB (sm_86)
+RAM        : 64GB
+OS         : Windows
+PyTorch    : 2.12.1 + cu130
+ComfyUI    : 0.33.3
+VRAM mode  : NORMAL_VRAM
+DynamicVRAM: enabled
+```
 
-## 模型与工作流下载
+**其他配置未经测试。** 24GB 以上、或 40/50 系的卡大概率用不上这些改动——
+你没有「墙一」那么紧的显存，也没有「墙二」的量化限制。
 
-完整资源包（**MiniMax H3 模型权重** + **示例 JSON 工作流**）见：
+---
 
-**[Comfyit 搅拌站 · 文章 506：MiniMax H3 模型和工作流](https://comfyit.cn/article/506)**
+## 已知限制与未完成
 
-下载后将 `models/` 合并到 `ComfyUI/models/`，JSON 工作流拖入 ComfyUI 即可。
+- **`balanced_20gb` 在多段场景下的净收益尚未验证。** 每段都要重新 stage 一次 TE（约 15GB），
+  单段是纯赚，多段可能不划算。**做长视频/多镜头前请自行对比 `standard`。**
+- `aggressive_lowmem` 是空档，行为等同 `standard`。
+- 尚未实施：跳过 pre-refine 解码（约省 13s）、`--disable-pinned-memory` 对照、
+  FFN 分块降峰值显存。
+- 二采仍是全流程最贵的一段（约 40%）。实测它**不是 attention 瓶颈**——
+  一采从 sage 拿到 −34.5%，二采只有 −4%，尽管二采 token 数是一采的 4.94 倍。
+  瓶颈在 FFN 与权重在 PCIe 上的搬运，方向还在找。
 
-也可参考：
-
-- **Hugging Face：** [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)
-- **ComfyUI 文档：** [MiniMax H3 工作流示例](https://docs.comfy.org/zh/tutorials/video/minimax/minimax-h3)
-
-本仓库自带示例：`example_workflows/`
-
-| 工作流 | task_type | UNET | 说明 |
-|--------|-----------|------|------|
-| `minimax_h3_director_t2v.json` | t2v | fl2va | 文生音视频 |
-| `minimax_h3_director_fl2v.json` | fl2v | fl2va | 首尾帧（「添加一组」） |
-| `minimax_h3_director_r2v.json` | r2v | **ref2va** | 参考改视频素材组 |
-| `minimax_h3_director_v2v.json` | v2v | **ref2va** | 源视频时间轴编辑 |
-| `minimax_h3_director_rv2v.json` | rv2v | **ref2va** | 源视频 + 参考图/音频 |
-| `minimax_h3_director_external_groups_i2v.json` | fl2v | fl2va | 外部 Group×2 → Combine → `i2v_groups` |
-| `minimax_h3_director_external_groups_r2v.json` | r2v | **ref2va** | 外部 Group×N → Combine → `r2v_groups` |
-| `minimax_h3_director_二采_加速.json` | r2v | **ref2va** | 外接 Refine 二采（SIGMAS + H3 latent）；`images` 与 `images_pre_refine` 各出一路成片 |
-
-### 推荐模型文件
-
-| 用途 | 文件名 | 目录 |
-|------|--------|------|
-| UNET (t2v / i2v / fl2v) | `minimax_h3_fl2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| UNET (r2v / v2v / rv2v) | `minimax_h3_ref2va_pruned_int8_convrot.safetensors` | `models/diffusion_models/` |
-| CLIP | `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` | `models/text_encoders/` |
-| Video VAE | `minimax_h3_video_vae_fp16.safetensors` | `models/vae/` |
-| Audio VAE | `minimax_h3_audio_vae_fp32.safetensors` | `models/vae/` |
-
-## 快速开始
-
-1. 确认 ComfyUI ≥ **0.30.0**，已能加载官方 MiniMax H3 节点
-2. 从 [文章 506](https://comfyit.cn/article/506) 或本仓库 `example_workflows/` 加载示例
-3. 连接 UNET / CLIP / video_vae / audio_vae，在导演台 UI 内编辑时间轴与提示词后 Queue
-
-**视频教程：** [B 站合集 · 插件使用教程](https://space.bilibili.com/1997403556/lists/8357740)
-
-### 默认采样参数
-
-- 画布默认 **0.4MP 16:9（864×480）**，**5 秒 / 124** 帧 @ **24 fps**（17k+5 网格）
-- **25** steps，`res_multistep` + `simple`，CFG **1.0**
-- Sigma shift：video **12** / audio **3**
-
-### 首尾帧 fl2v 用法摘要
-
-1. 任务类型选 **「首尾帧生视频 (fl2v)」**
-2. 点击「添加一组」，上传首帧和/或尾帧（可只传尾帧）
-3. 在镜卡片或时间轴上调整时长；提示词写中间运动 / 镜头 / 过渡
-4. Queue 生成；多组可勾选「选择运行」只跑部分组
-
-### 参考主体 r2v 用法摘要
-
-1. 任务类型选 **「参考主体生视频 (r2v)」**（需 **ref2va** UNET + audio_vae）
-2. 点击 **「启用公共参数」** 展开面板（默认折叠/关闭）；上传共用参考图/音频并写公共提示词（如角色锁定 / `subject_definitions`）；启用后会与每组提示词拼接
-3. 点击「添加素材组」；每组写分镜提示词，可按需再挂本组独有素材（同槽位覆盖公共素材）
-4. 提示词中用 `<Picture N>` / `<Video K>` / `<Audio J>`，或输入 `@`（启用公共参数时可引用公共 + 本组素材）
-5. 时间轴可预览各组时长与缩略图；「选择运行」与素材组勾选同步
-
-### 源视频 v2v / rv2v 用法摘要
-
-1. 选 **v2v** 或 **rv2v**，上传源视频并分段（切分 / 均分 / 智能分割）
-2. 每段写提示词；系统自动将源片段绑定为 `<Video 1>`
-3. `rv2v` 可额外上传参考图 / 参考音频；声音模式可选生成 / 原声 / 静音
-
-### 二采 / 放大 Refine 用法摘要
-
-1. 添加 **MiniMax H3 Director Refine**，把 `refine` 接到导演台 `refine` 口。不接则仍是原来的一采
-2. `mode=refine`：同分辨率再采一遍（精修）。`mode=upscale`：先放大到目标画布再二采。`mode=latent_upscale`：只放大 H3 视频 latent，不再二采。分辨率控件在 `upscale` / `latent_upscale` 时显示（可跟随导演台、按比例+百万像素，或自定义宽高）。导演台是一采分辨率，Refine 目标才是放大后的宽高
-3. `passes`：精修次数，默认 1、最多 9999。`upscale` 只在第 1 次放大，后面都是同分辨率精修；`latent_upscale` 不二采
-4. 可选接 `refine_model`（二采 UNET）；不接则用导演台主模型。适合一采挂 Turbo LoRA、二采卸掉或换另一套
-5. 导演台 `images` 是二采后成片；`images_pre_refine` 是一采、放大前的画面，便于对比。`source_images` 仍是时间轴原片，不是一采结果
-6. 二采用 SIGMAS：把 `BasicScheduler` 或 `ManualSigmas` 接到 Refine 的 `sigmas` 口
-7. fl2v 默认跳过二采（保护钉死的首尾帧）；关掉 Refine 上的 `skip_fl2v` 才会采
-8. `upscale` 默认 `h3_latent`：在 Refine 节点里选 3D 权重（`upscale_method` 下方下拉框；`mode=latent_upscale` 时同样出现）。权重放 `ComfyUI/models/latent_upscale_models/`。`lanczos` 可另接 `upscale_model`（RealESRGAN 等），不接则纯插值；也可改 `nvidia_rtx_vsr`
-9. 「分段导出」且 `passes>1` 时，每轮会另落 `seg_XXXX_pN.mp4`；「全部导出」只出一采和终稿
-10. `confirm_first_pass`（先确认一采）：默认关 = 一采完立刻二采。开启后第一次 Queue 只跑一采、写出一采缓存与 `_pre.mp4`；确认满意后用**同一 seed**（seed 用 `fixed`）再 Queue，就跳过一采只跑二采。缓存按 seed 与一采参数精确匹配，改了提示词 / 分辨率 / 步数就会重新一采
-
-示例：`example_workflows/minimax_h3_director_二采_加速.json`
-
-### 外部多组接线（第三方节点接入）
-
-对齐官网两个 conditioning 节点，把扩写 / 抠图 / Load Video 等处理结果以**多组**形式送进导演台：
-
-1. 添加 **`MiniMax H3 Director Group (Image to Video)`** 或 **`(Reference to Video)`**
-2. 按组接线：`prompt` / `duration_sec`；I2V 系接 `first_frame` / `last_frame`（无帧=t2v，仅首=i2v，仅尾或首+尾=fl2v）；R2V 为 Autogrow（同官方 Reference to Video）：接图/视频/音频会自动多出空口（图≤9、视频≤3、音频≤3）。输出宽高在**导演台**统一设置
-3. 多组：用 **`Director Groups Combine`**（Autogrow：接满最后一个口会自动多出新口，同官方 Reference to Video）→ 导演台 `i2v_groups` / `r2v_groups`；单组可直接把 `group` 连到导演台
-4. 导演台 `task_type` 与口一致（t2v/i2v/fl2v ↔ `i2v_groups`；r2v ↔ `r2v_groups`）；**不要两口同时连接**
-5. 连接后执行以图中接线为准（外部优先）；UI 卡片变淡，仍可用「选择运行」按组序勾选
-
-## 配套生态 · [Comfyit 搅拌站](https://comfyit.cn/)
-
-[Comfyit](https://comfyit.cn/) 提供环境、模型、工作流与教程配套：
-
-| 栏目 | 链接 |
-|------|------|
-| 模型 / 工作流包 | [comfyit.cn/article/506](https://comfyit.cn/article/506) |
-| 官方 MiniMax H3 文档 | [docs.comfy.org · MiniMax H3](https://docs.comfy.org/zh/tutorials/video/minimax/minimax-h3) |
-| 插件视频教程 | [B 站合集](https://space.bilibili.com/1997403556/lists/8357740) |
-| 产品中心 | [comfyit.cn/products](https://comfyit.cn/products) |
-| 插件广场 | [comfyit.cn/plugins](https://comfyit.cn/plugins) |
-| 模型广场 | [comfyit.cn/resources/models](https://comfyit.cn/resources/models) |
-| 工作流广场 | [comfyit.cn/workflows](https://comfyit.cn/workflows) |
-
-## 作者与交流
-
-| | |
-|---|---|
-| **维护者** | [AI搅拌手 / AIMixer](https://github.com/AIMixer) |
-| **本仓库** | [github.com/AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director) |
-| **姊妹插件** | [ComfyUI_Bernini_Director](https://github.com/AIMixer/ComfyUI_Bernini_Director) |
-| **作者 QQ** | **3697688140** |
-| **B 站** | [space.bilibili.com/1997403556](https://space.bilibili.com/1997403556) |
-| **插件教程** | [B 站合集 · 使用教程](https://space.bilibili.com/1997403556/lists/8357740) |
-| **QQ 交流群** | **551482703** · **425064221** · **559826331** |
-| **Comfyit 搅拌站** | [comfyit.cn](https://comfyit.cn/) |
+---
 
 ## 致谢
 
+本分支的**全部核心功能都来自上游**，作者是 **[AI搅拌手 / AIMixer](https://github.com/AIMixer)**。
+时间轴、段间引导、二采/放大、多任务模式、前端 UI、一采确认——这些都是上游的工作。
+本分支只是在外围加了内存调度与诊断。
+
+- **[AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director)** — 上游原仓库
 - [Comfy-Org / ComfyUI](https://github.com/Comfy-Org/ComfyUI) — 官方 MiniMax H3 支持
 - [MiniMax-AI](https://github.com/MiniMax-AI) — MiniMax H3 模型
-- [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) — 权重与文档
-- [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — 段间运动/音频续拍思路参考
-- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent 放大架构与权重格式参考
+- [NikoDemon80/ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) — 段间运动续拍思路
+- [LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler](https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler) — H3 3D latent 放大
+- [Comfyit 搅拌站](https://comfyit.cn/) — 模型、工作流与教程配套
+
+**遇到问题请先确认是不是本分支引入的**：把 `memory_strategy` 切回 `standard` 复现一次。
+如果 `standard` 下同样存在，那是上游的问题，请去上游反馈——
+不要占用上游维护者处理本分支的时间。
 
 ## 许可证
 
-Apache-2.0
+Apache-2.0，与上游一致。
