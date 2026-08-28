@@ -417,24 +417,40 @@ def model_fingerprint(model: Any) -> str:
     try:
         inner = getattr(model, "model", None)
         target = getattr(inner, "diffusion_model", None) or inner or model
-        params = 0
-        weight_bytes = 0
+
+        # state_dict() includes buffers — the int8/int4 weights and their scales.
+        # parameters() alone reports the logical bf16 view, which is identical
+        # across H3 checkpoints and therefore cannot tell int8-convrot from
+        # W4A8-mixed. Storage bytes can.
+        seen: set[int] = set()
+        stored_bytes = 0
+        elems = 0
         dtypes: dict[str, int] = {}
-        for tensor in getattr(target, "parameters", lambda: [])():
+        state = getattr(target, "state_dict", None)
+        items = state().items() if callable(state) else []
+        for _name, tensor in items:
             if not torch.is_tensor(tensor):
                 continue
+            try:
+                ptr = int(tensor.untyped_storage().data_ptr())
+                nbytes = int(tensor.untyped_storage().nbytes())
+            except Exception:
+                ptr, nbytes = id(tensor), tensor.numel() * tensor.element_size()
+            if ptr not in seen:
+                seen.add(ptr)
+                stored_bytes += nbytes
             n = int(tensor.numel())
-            params += n
-            weight_bytes += n * int(tensor.element_size())
+            elems += n
             key = str(tensor.dtype).replace("torch.", "")
             dtypes[key] = dtypes.get(key, 0) + n
-        if params == 0:
-            return f"{type(target).__name__} (no parameters visible)"
-        top = sorted(dtypes.items(), key=lambda kv: -kv[1])[:3]
+        if stored_bytes == 0:
+            return f"{type(target).__name__} (no weights visible)"
+        top = sorted(dtypes.items(), key=lambda kv: -kv[1])[:4]
         dtype_text = ", ".join(f"{k}:{v / 1e6:.0f}M" for k, v in top)
         return (
-            f"{type(target).__name__} | params={params / 1e9:.2f}B | "
-            f"weights={weight_bytes / (1024.0 ** 3):.2f}GiB | {dtype_text}"
+            f"{type(target).__name__} | tensors={len(seen)} | "
+            f"elems={elems / 1e9:.2f}B | "
+            f"stored={stored_bytes / (1024.0 ** 3):.2f}GiB | {dtype_text}"
         )
     except Exception as exc:
         return f"fingerprint failed ({type(exc).__name__})"
@@ -713,6 +729,31 @@ class DirectorMemoryDebug:
         self._last_cp_t = now
         self._last_cp_label = label
 
+    # A timed run is only comparable to another timed run that started from the
+    # same place. These thresholds flag a start state that is carrying models,
+    # shared-memory mappings or RAM pressure over from a previous run.
+    COLD_MAX_GPU_SHARED_MIB = 2048.0
+    COLD_MIN_AVAIL_RAM_MIB = 24576.0
+
+    def _classify_start_state(self, snap: dict[str, Any]) -> str:
+        reasons: list[str] = []
+        shared = snap.get("gpu_shared_mib")
+        avail = snap.get("system_available_mib")
+        used = snap.get("nvml_used_mib")
+        if shared is not None and shared > self.COLD_MAX_GPU_SHARED_MIB:
+            reasons.append(f"GPUShared={shared:.0f}MiB already mapped")
+        if avail is not None and avail < self.COLD_MIN_AVAIL_RAM_MIB:
+            reasons.append(f"only {avail:.0f}MiB RAM free at start")
+        if used is not None and used > 4096.0:
+            reasons.append(f"NVMLUsed={used:.0f}MiB already resident")
+        if not reasons:
+            return "[Baseline] COLD start — timings are comparable to other cold runs."
+        return (
+            "[Baseline] WARM start — NOT comparable to a cold run ("
+            + "; ".join(reasons)
+            + "). Restart ComfyUI before a timed comparison."
+        )
+
     def begin_run(self, *, plan_note: str = "") -> None:
         if not self.enabled:
             return
@@ -722,6 +763,15 @@ class DirectorMemoryDebug:
             except Exception:
                 pass
         self.checkpoint("Run Start")
+        try:
+            verdict = self._classify_start_state(snapshot_memory())
+            self._lines.append(verdict)
+            if "WARM" in verdict:
+                log.warning("%s", verdict)
+            else:
+                log.info("%s", verdict)
+        except Exception as exc:
+            log.debug("start-state classification skipped: %s", exc)
         if plan_note:
             log.info("%s strategy=%s | %s", self._prefix(), self.memory_strategy, plan_note)
 
