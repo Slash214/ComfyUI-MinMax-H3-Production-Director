@@ -36,7 +36,7 @@ TASK_PROMPT_SPECS: tuple[TaskPromptSpec, ...] = (
         "fl2v",
         "首尾帧生视频(First-Last Frame)",
         "",
-        "首帧+尾帧约束（ImageToVideo + first_frame + last_frame）。",
+        "首帧+尾帧约束（可不传图=文生；ImageToVideo 可选 first/last）。",
     ),
     TaskPromptSpec(
         "r2v",

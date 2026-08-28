@@ -3,7 +3,8 @@
 Preferred schema: timeline.shots[] — each shot is one sampling group:
   - startImage (optional): image0 first keyframe
   - endImage (optional): image1 last keyframe; official FL2VA allows last-only
-  - at least one of start/end required
+  - neither start nor end: text-to-video on the same fl2va path (prompt only;
+    with「段间引导」+「引用上段」the previous tail is pinned as motion context)
   - durationSec: per-shot length; totalFrames ≈ sum of shot frames
 
 Legacy flat keyframes/segments (isStartFrame / isEndFrame) still supported via
@@ -60,7 +61,7 @@ def _image_ref_from_raw(raw: Any) -> dict[str, Any] | None:
 
 
 def _normalize_shots(raw_shots: list | None, *, frame_rate: float = 24.0) -> list[dict[str, Any]]:
-    """Normalize explicit shots[] groups. Skips shots with neither start nor end image."""
+    """Normalize explicit shots[]. Empty start+end is kept as a text-to-video shot."""
     out: list[dict[str, Any]] = []
     if not raw_shots:
         return out
@@ -70,8 +71,6 @@ def _normalize_shots(raw_shots: list | None, *, frame_rate: float = 24.0) -> lis
             continue
         start = _image_ref_from_raw(item.get("startImage") or item.get("start_image"))
         end = _image_ref_from_raw(item.get("endImage") or item.get("end_image"))
-        if start is None and end is None:
-            continue
         try:
             dur = float(item.get("durationSec") or item.get("duration_sec") or DEFAULT_FL2V_DURATION_SEC)
         except (TypeError, ValueError):
@@ -79,45 +78,48 @@ def _normalize_shots(raw_shots: list | None, *, frame_rate: float = 24.0) -> lis
         dur = max(0.1, dur)
         fc = max(MIN_FL2V_FRAMES, _duration_to_minimax_frames(dur, frame_rate))
         dim_src = start or end
-        out.append(
-            {
-                "source_index": i,
-                "start": (
-                    {
-                        "imageFile": start["imageFile"],
-                        "imageB64": start["imageB64"],
-                        "width": start["width"],
-                        "height": start["height"],
-                        "start": cursor,
-                        "length": fc,
-                        "frameCount": fc,
-                    }
-                    if start is not None
-                    else None
-                ),
-                "end": (
-                    {
-                        "imageFile": end["imageFile"],
-                        "imageB64": end["imageB64"],
-                        "width": end["width"],
-                        "height": end["height"],
-                    }
-                    if end is not None
-                    else None
-                ),
-                "frameCount": fc,
-                "timeline_start": cursor,
-                "width": int((dim_src or {}).get("width") or 0),
-                "height": int((dim_src or {}).get("height") or 0),
-                "prompt": (item.get("prompt") or "").strip(),
-                "negativePrompt": (
-                    item.get("negativePrompt")
-                    or item.get("negative_prompt")
-                    or DEFAULT_FL2V_NEGATIVE
-                ).strip()
-                or DEFAULT_FL2V_NEGATIVE,
-            }
-        )
+        row = {
+            "source_index": i,
+            "start": (
+                {
+                    "imageFile": start["imageFile"],
+                    "imageB64": start["imageB64"],
+                    "width": start["width"],
+                    "height": start["height"],
+                    "start": cursor,
+                    "length": fc,
+                    "frameCount": fc,
+                }
+                if start is not None
+                else None
+            ),
+            "end": (
+                {
+                    "imageFile": end["imageFile"],
+                    "imageB64": end["imageB64"],
+                    "width": end["width"],
+                    "height": end["height"],
+                }
+                if end is not None
+                else None
+            ),
+            "frameCount": fc,
+            "timeline_start": cursor,
+            "width": int((dim_src or {}).get("width") or 0),
+            "height": int((dim_src or {}).get("height") or 0),
+            "prompt": (item.get("prompt") or "").strip(),
+            "negativePrompt": (
+                item.get("negativePrompt")
+                or item.get("negative_prompt")
+                or DEFAULT_FL2V_NEGATIVE
+            ).strip()
+            or DEFAULT_FL2V_NEGATIVE,
+        }
+        if "continuityFromPrev" in item:
+            row["continuityFromPrev"] = item.get("continuityFromPrev")
+        elif "continuity_from_prev" in item:
+            row["continuity_from_prev"] = item.get("continuity_from_prev")
+        out.append(row)
         cursor += fc
     return out
 
@@ -246,9 +248,11 @@ def reinforce_fl2v_prompt(
     """Ensure first/last-frame hard constraints wrap the (possibly PE-enhanced) prompt.
 
     Hard locks are placed *before* the motion body so they survive token truncation.
-    Supports start-only, end-only, and start+end (official MiniMax H3 FL2VA).
+    Supports start-only, end-only, start+end, and neither (plain text-to-video).
     """
     text = fl2v_prompt_body_only(prompt)
+    if not has_start_frame and not has_end_frame:
+        return text
     if has_start_frame and has_end_frame:
         prefix, suffix = FLF_PROMPT_PREFIX, FLF_PROMPT_SUFFIX
     elif has_end_frame:
@@ -560,12 +564,12 @@ def build_fl2v_director_plan(
     if not shots:
         if not keyframes:
             raise ValueError(
-                "fl2v: 请至少添加一组并上传首帧和/或尾帧图片。"
+                "fl2v: 请至少添加一组。每组可只写提示词（文生），或上传首帧和/或尾帧。"
             )
         shots = _expand_shots(keyframes)
         if not shots:
             raise ValueError(
-                "fl2v: 没有可用的组。请添加一组并上传首帧和/或尾帧。"
+                "fl2v: 没有可用的组。请添加一组（可只写提示词，或上传首帧/尾帧）。"
             )
 
     # runSelection uses shot indices when shots[] is present; else keyframe indices.
@@ -630,8 +634,6 @@ def build_fl2v_director_plan(
     for shot in shots:
         start_kf = shot.get("start")
         end_kf = shot.get("end")
-        if start_kf is None and end_kf is None:
-            raise ValueError("fl2v: 某一组既无首帧也无尾帧，请至少上传其中一张。")
         start_f = int(shot.get("timeline_start") or 0)
         fc = max(MIN_FL2V_FRAMES, int(shot["frameCount"]))
         user_prompt = (shot.get("prompt") or "").strip() or fallback_prompt
@@ -681,12 +683,16 @@ def build_fl2v_director_plan(
             refs.append(SegmentRef(index=1, tensor=end_img[:1].clone()))
 
         # Last-only: no source_clip — otherwise held end would be read as first_frame.
+        # Empty shot: dummy clip; ImageToVideo gets no keyframes (text-to-video).
         if start_img is not None:
             source_clip = _build_fl2v_endpoint_source(start_img, end_img, fc)
             source_clips.append(source_clip[:1].clone())
-        else:
+        elif end_img is not None:
             source_clip = None
             source_clips.append(end_img[:1].clone())
+        else:
+            source_clip = None
+            source_clips.append(torch.full((1, 16, 16, 3), 0.5, dtype=torch.float32))
 
         end_f = start_f + fc
         if run_sel is None or int(shot["source_index"]) in run_sel:
@@ -713,7 +719,7 @@ def build_fl2v_director_plan(
 
     if not segments:
         raise ValueError(
-            "fl2v: 没有可运行的组。请添加一组并上传首帧和/或尾帧。"
+            "fl2v: 没有可运行的组。请添加一组（可只写提示词，或上传首帧/尾帧）。"
         )
     if run_sel is not None and not selected_plan_indices:
         raise ValueError(
