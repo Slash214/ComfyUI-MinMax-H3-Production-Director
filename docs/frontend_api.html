@@ -1,0 +1,762 @@
+<title>H3 导演台对接手册</title>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --surface: #ffffff;
+    --surface-2: #f4f2ee;
+    --border: #e2ddd5;
+    --border-strong: #cfc8bd;
+    --text: #1c1a17;
+    --text-dim: #605a51;
+    --text-faint: #8a8279;
+    --accent: #b4532a;
+    --accent-soft: #fdf0e9;
+    --warn: #9a6a06;
+    --warn-soft: #fdf5e2;
+    --danger: #a32f2f;
+    --danger-soft: #fdecec;
+    --ok: #3d6b3d;
+    --ok-soft: #eef5ed;
+    --code-bg: #f4f2ee;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+      "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #161513;
+      --surface: #1e1d1a;
+      --surface-2: #262420;
+      --border: #34312b;
+      --border-strong: #474339;
+      --text: #ece8e1;
+      --text-dim: #a8a196;
+      --text-faint: #7d766b;
+      --accent: #e0834f;
+      --accent-soft: #2c1e15;
+      --warn: #d8a63f;
+      --warn-soft: #2b2415;
+      --danger: #e07070;
+      --danger-soft: #2e1a1a;
+      --ok: #82b082;
+      --ok-soft: #1b2419;
+      --code-bg: #232120;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #161513;
+    --surface: #1e1d1a;
+    --surface-2: #262420;
+    --border: #34312b;
+    --border-strong: #474339;
+    --text: #ece8e1;
+    --text-dim: #a8a196;
+    --text-faint: #7d766b;
+    --accent: #e0834f;
+    --accent-soft: #2c1e15;
+    --warn: #d8a63f;
+    --warn-soft: #2b2415;
+    --danger: #e07070;
+    --danger-soft: #2e1a1a;
+    --ok: #82b082;
+    --ok-soft: #1b2419;
+    --code-bg: #232120;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.75;
+    margin: 0;
+    padding: 0 20px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; }
+
+  header.masthead {
+    padding: 56px 0 28px;
+    border-bottom: 2px solid var(--text);
+    margin-bottom: 40px;
+  }
+  header.masthead .kicker {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 12px;
+  }
+  header.masthead h1 {
+    font-size: clamp(28px, 5vw, 40px);
+    line-height: 1.2;
+    margin: 0 0 14px;
+    letter-spacing: -0.01em;
+  }
+  header.masthead p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 16px;
+    max-width: 60ch;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin-top: 20px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-faint);
+  }
+
+  nav.toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 44px;
+  }
+  nav.toc h2 {
+    font-size: 12px;
+    font-family: var(--mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+    margin: 0 0 12px;
+  }
+  nav.toc ol { margin: 0; padding-left: 20px; columns: 2; column-gap: 32px; }
+  nav.toc li { margin-bottom: 5px; break-inside: avoid; }
+  nav.toc a { color: var(--text); text-decoration: none; border-bottom: 1px solid transparent; }
+  nav.toc a:hover { border-bottom-color: var(--accent); color: var(--accent); }
+  @media (max-width: 620px) { nav.toc ol { columns: 1; } }
+
+  section { margin-bottom: 52px; scroll-margin-top: 24px; }
+  h2 {
+    font-size: 22px;
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 400;
+  }
+  h2 + .lede { color: var(--text-dim); margin: 0 0 22px; }
+  h3 {
+    font-size: 16px;
+    margin: 32px 0 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  p { margin: 0 0 14px; }
+  ul, ol { margin: 0 0 14px; padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  code {
+    font-family: var(--mono);
+    font-size: 0.875em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    white-space: nowrap;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 0 0 18px;
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  pre code {
+    background: none;
+    border: 0;
+    padding: 0;
+    font-size: inherit;
+    white-space: pre;
+  }
+
+  .tw { overflow-x: auto; margin: 0 0 18px; border: 1px solid var(--border); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th {
+    background: var(--surface-2);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td code { white-space: nowrap; }
+
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    border-radius: 0 8px 8px 0;
+    padding: 14px 18px;
+    margin: 0 0 18px;
+  }
+  .callout > :last-child { margin-bottom: 0; }
+  .callout .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 6px;
+  }
+  .callout.warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .callout.warn .tag { color: var(--warn); }
+  .callout.danger { border-left-color: var(--danger); background: var(--danger-soft); }
+  .callout.danger .tag { color: var(--danger); }
+  .callout.ok { border-left-color: var(--ok); background: var(--ok-soft); }
+  .callout.ok .tag { color: var(--ok); }
+
+  .pill {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 20px;
+    border: 1px solid var(--border-strong);
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .pill.yes { color: var(--accent); border-color: var(--accent); }
+  .pill.no { color: var(--text-faint); }
+
+  .check { list-style: none; padding-left: 0; }
+  .check li {
+    padding-left: 26px;
+    position: relative;
+    margin-bottom: 9px;
+  }
+  .check li::before {
+    content: "☐";
+    position: absolute;
+    left: 0;
+    top: 0;
+    color: var(--accent);
+    font-size: 15px;
+  }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 22px;
+    border-top: 1px solid var(--border);
+    color: var(--text-faint);
+    font-size: 13px;
+  }
+</style>
+
+<div class="wrap">
+
+<header class="masthead">
+  <p class="kicker">ComfyUI · MiniMax H3 Production Director</p>
+  <h1>导演台接口对接手册</h1>
+  <p>前端与后台通过 4 个 API workflow 驱动多镜头音视频生成。一次提交 = 一条时间轴 = N 个镜头，输出一条已拼接、带原生立体声的视频。</p>
+  <div class="meta-row">
+    <span>版本 timeline_data v5</span>
+    <span>ComfyUI 0.33.3</span>
+    <span>更新 2026-08-25</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <h2>目录</h2>
+  <ol>
+    <li><a href="#s1">四个 workflow 文件</a></li>
+    <li><a href="#s2">提交与回调</a></li>
+    <li><a href="#s3">节点对照表</a></li>
+    <li><a href="#s4">Director 节点参数</a></li>
+    <li><a href="#s5">timeline_data 结构</a></li>
+    <li><a href="#s6">帧数换算规则</a></li>
+    <li><a href="#s7">段间引导</a></li>
+    <li><a href="#s8">单镜头模式</a></li>
+    <li><a href="#s9">图片的两种传法</a></li>
+    <li><a href="#s10">预览版与成片</a></li>
+    <li><a href="#s11">提交前自检</a></li>
+    <li><a href="#s12">常见错误</a></li>
+  </ol>
+</nav>
+
+<section id="s1">
+  <h2><span class="num">01</span>四个 workflow 文件</h2>
+  <p class="lede">位于 <code>example_workflows/api/</code>。四份文件的图结构完全相同，只有模型与任务类型不同。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>文件</th><th>任务</th><th>UNET</th><th>Turbo LoRA</th></tr></thead>
+    <tbody>
+      <tr><td><code>api_t2v.json</code></td><td>文生视频</td><td>fl2va</td><td>fl2v_turbo_4step</td></tr>
+      <tr><td><code>api_i2v.json</code></td><td>图生视频</td><td>fl2va</td><td>fl2v_turbo_4step</td></tr>
+      <tr><td><code>api_fl2v.json</code></td><td>首尾帧生视频</td><td>fl2va</td><td>fl2v_turbo_4step</td></tr>
+      <tr><td><code>api_r2v.json</code></td><td>参考主体生视频</td><td><strong>ref2va</strong></td><td><strong>ref2v_turbo_4step</strong></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout danger">
+    <span class="tag">不要混用</span>
+    <p>UNET 与 Turbo LoRA <strong>必须配套</strong>。把 <code>ref2v_turbo</code> 挂到 fl2va 上（或反过来）不会报错，但会直接出噪声画面。后台不要动 node <code>1</code> 和 node <code>25</code> 的模型名。</p>
+  </div>
+
+  <div class="callout">
+    <span class="tag">关于 refine</span>
+    <p>文件里残留了 node <code>18 / 20 / 21 / 22 / 23 / 24</code>（二采放大链路），但它们<strong>没有连到任何输出</strong>，ComfyUI 不会执行。可以忽略，也可以整段删掉让 JSON 更干净。</p>
+  </div>
+</section>
+
+<section id="s2">
+  <h2><span class="num">02</span>提交与回调</h2>
+  <p class="lede">标准 ComfyUI HTTP + WebSocket 协议，额外多两个插件自定义事件。</p>
+
+  <h3>提交任务</h3>
+<pre><code>POST http://&lt;host&gt;:8189/prompt
+Content-Type: application/json
+
+{
+  "prompt": { ...改好的 workflow JSON... },
+  "client_id": "&lt;前端生成的 uuid&gt;"
+}
+
+→ 200 { "prompt_id": "b1f0...", "number": 3 }</code></pre>
+
+  <h3>订阅进度</h3>
+<pre><code>ws://&lt;host&gt;:8189/ws?clientId=&lt;同一个 uuid&gt;</code></pre>
+
+  <div class="tw"><table>
+    <thead><tr><th>事件</th><th>来源</th><th>用途</th></tr></thead>
+    <tbody>
+      <tr><td><code>executing</code></td><td>ComfyUI</td><td>当前执行到哪个节点；<code>node: null</code> 表示整条流程结束</td></tr>
+      <tr><td><code>progress</code></td><td>ComfyUI</td><td>采样步数进度</td></tr>
+      <tr><td><code>minimax_director_progress</code></td><td>插件</td><td><strong>分段进度</strong>，见下方 payload</td></tr>
+      <tr><td><code>minimax_director_preview</code></td><td>插件</td><td>逐帧预览图（base64 JPEG），可做实时预览</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3><code>minimax_director_progress</code> payload</h3>
+<pre><code>{
+  "node_id": "12",
+  "segment": 2,                    // 当前第几段（从 1 开始）
+  "segment_total": 5,              // 本次要跑几段
+  "timeline_segment": 2,           // 在时间轴上的序号
+  "timeline_segment_total": 5,
+  "partial_run": false,            // 是否只跑了部分段
+  "phase": "sample",               // prepare / sample / decode / finish
+  "phase_label": "采样",
+  "phase_value": 12,
+  "phase_max": 20,
+  "overall_value": 6.6,
+  "overall_max": 15,
+  "remaining_segments": 3,
+  "frames_label": "0–124",
+  "task_key": "t2v"
+}</code></pre>
+  <p>前端进度条建议直接用 <code>overall_value / overall_max</code>，它已经把「段数 × 阶段」折算好了。</p>
+
+  <h3>取结果</h3>
+<pre><code>GET http://&lt;host&gt;:8189/history/&lt;prompt_id&gt;
+
+→ outputs["7"]  // SaveVideo 节点，内含输出文件名与子目录
+→ outputs["8"]  // 运行报告文本：分段计划、每段任务摘要、段间引导状态</code></pre>
+  <p>拿到文件名后用 <code>GET /view?filename=...&amp;subfolder=...&amp;type=output</code> 下载。<code>outputs["8"]</code> 的报告文本很适合写进任务日志，排查问题时能直接看到每段实际用了什么参数。</p>
+</section>
+
+<section id="s3">
+  <h2><span class="num">03</span>节点对照表</h2>
+  <p class="lede">API 格式里节点是数字 key。后台<strong>只需要改 node 12</strong>，其余保持原样。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>node</th><th>class_type</th><th>作用</th><th>后台改动</th></tr></thead>
+    <tbody>
+      <tr><td><code>1</code></td><td>UNETLoader</td><td>主 UNET</td><td><span class="pill no">不改</span></td></tr>
+      <tr><td><code>2</code></td><td>CLIPLoader</td><td>Qwen3-VL 文本编码器</td><td><span class="pill no">不改</span></td></tr>
+      <tr><td><code>3</code> / <code>4</code></td><td>VAELoader</td><td>视频 VAE / 音频 VAE</td><td><span class="pill no">不改</span></td></tr>
+      <tr><td><code>25</code></td><td>LoraLoaderModelOnly</td><td>Turbo 加速 LoRA</td><td><span class="pill no">不改</span></td></tr>
+      <tr><td><code>17</code> → <code>16</code></td><td>Sage Attention Patch</td><td>注意力加速</td><td><span class="pill no">不改</span></td></tr>
+      <tr><td><strong><code>12</code></strong></td><td><strong>MiniMaxH3Director</strong></td><td><strong>核心：时间轴 + 采样</strong></td><td><span class="pill yes">要改</span></td></tr>
+      <tr><td><code>6</code></td><td>CreateVideo</td><td>画面 + 音频封装</td><td><span class="pill no">不改</span></td></tr>
+      <tr><td><code>7</code></td><td>SaveVideo</td><td>落盘</td><td><code>filename_prefix</code> 可改</td></tr>
+      <tr><td><code>8</code></td><td>PreviewAny</td><td>运行报告</td><td><span class="pill no">不改</span></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="s4">
+  <h2><span class="num">04</span>Director 节点参数（node 12）</h2>
+
+  <div class="tw"><table>
+    <thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>task_type</code></td><td>string</td><td>任务类型显示名。<strong>仅作兜底</strong>，真正生效的是 <code>timeline_data.global.taskType</code>，两处必须一致</td></tr>
+      <tr><td><code>timeline_data</code></td><td>string</td><td><strong>整条时间轴，JSON 序列化后的字符串</strong>。所有镜头信息都在这里</td></tr>
+      <tr><td><code>seed</code></td><td>int</td><td>随机种子。预览与成片必须用<strong>同一个 seed</strong>才能保证构图一致</td></tr>
+      <tr><td><code>steps</code></td><td>int</td><td>采样步数。预览 <code>8</code>，成片 <code>20</code></td></tr>
+      <tr><td><code>cfg</code></td><td>float</td><td>固定 <code>1.0</code>，Turbo LoRA 下不要调</td></tr>
+      <tr><td><code>width</code> / <code>height</code></td><td>int</td><td>画布，必须是 <strong>32 的倍数</strong>。要和 <code>timeline_data</code> 里的 <code>width</code>/<code>height</code>/<code>output.width</code>/<code>output.height</code> 全部保持一致</td></tr>
+      <tr><td><code>total_frames</code></td><td>int</td><td>总帧数 = 各段 <code>length</code> 之和</td></tr>
+      <tr><td><code>frame_rate</code></td><td>float</td><td><code>24</code>。H3 就是按 24fps 训练的，不要改</td></tr>
+      <tr><td><code>sampler</code> / <code>scheduler</code></td><td>string</td><td><code>res_multistep</code> / <code>simple</code></td></tr>
+      <tr><td><code>shift_video</code> / <code>shift_audio</code></td><td>float</td><td><code>12</code> / <code>3</code></td></tr>
+      <tr><td><code>memory_strategy</code></td><td>string</td><td><code>balanced_20gb</code>（针对 3080 20G）</td></tr>
+      <tr><td><code>clear_vram_between_segments</code></td><td>bool</td><td><strong>必须是 <code>true</code></strong>。为 false 或空串时多段会显存溢出</td></tr>
+      <tr><td><code>memory_debug</code></td><td>bool</td><td>生产环境 <code>false</code></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="s5">
+  <h2><span class="num">05</span>timeline_data 结构</h2>
+  <p class="lede">这是整个对接的核心。它是一个 <strong>JSON 字符串</strong>，不是对象——写进 <code>node 12.inputs.timeline_data</code> 前要先 <code>JSON.stringify()</code>。</p>
+
+  <h3>顶层字段</h3>
+  <div class="tw"><table>
+    <thead><tr><th>字段</th><th>值</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td><code>version</code></td><td><code>5</code></td><td>固定</td></tr>
+      <tr><td><code>editMode</code></td><td><code>"segment"</code></td><td>每段独立提示词。用 <code>"global"</code> 则所有段共用 <code>global.prompt</code></td></tr>
+      <tr><td><code>timelineMode</code></td><td><code>"prompt_batch"</code></td><td>t2v / i2v / r2v 多镜头模式；fl2v 用 <code>"fl2v"</code></td></tr>
+      <tr><td><code>totalFrames</code></td><td>int</td><td>各段 <code>length</code> 之和</td></tr>
+      <tr><td><code>frameRate</code></td><td><code>24</code></td><td></td></tr>
+      <tr><td><code>width</code> / <code>height</code></td><td>int</td><td>×32</td></tr>
+      <tr><td><code>refMaxSize</code></td><td>int</td><td>参考图长边上限，一般等于画布长边</td></tr>
+      <tr><td><code>global</code></td><td>object</td><td>见下</td></tr>
+      <tr><td><code>output</code></td><td>object</td><td>见下</td></tr>
+      <tr><td><code>segments</code></td><td>array</td><td><strong>镜头数组</strong>，见下</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>global</h3>
+<pre><code>"global": {
+  "taskType": "t2v — 文生视频(Text to Video)",   // ← 真正决定任务类型
+  "prompt": "",                                  // editMode=segment 时作为段内空提示词的回落
+  "refs": [],
+  "refAudios": [],
+  "refVideos": [],
+  "genImage": { "imageFile": "" },
+  "referenceVideo": { "videoFile": "", "fileName": "", "type": "input", "subfolder": "" },
+  "continuousReference": false,
+  "commonEnabled": false
+}</code></pre>
+
+  <div class="callout warn">
+    <span class="tag">taskType 必须逐字一致</span>
+    <p>是带中文说明的完整字符串，不是 <code>"t2v"</code>：</p>
+    <ul>
+      <li><code>"t2v — 文生视频(Text to Video)"</code></li>
+      <li><code>"i2v — 图生视频(Image to Video)"</code></li>
+      <li><code>"fl2v — 首尾帧生视频(First-Last Frame)"</code></li>
+      <li><code>"r2v — 参考主体生视频(Reference to Video)"</code></li>
+    </ul>
+    <p>中间是 <strong>em dash（—）</strong>，不是普通连字符。直接从导出的 JSON 里复制，不要手打。</p>
+  </div>
+
+  <h3>output</h3>
+<pre><code>"output": {
+  "mode": "fixed",
+  "width": 352,
+  "height": 608,
+  "longEdge": 608,
+  "aspectRatio": "9:16 (竖屏)",
+  "megapixels": 0.2,
+  "multiple": 32,
+  "maxExportFrames": 0,
+  "exportMode": "all",              // 全部导出
+  "audioMode": "generate",          // 与画面同次采样生成音频
+  "refImageSize": "match",
+  "continuityEnabled": true,        // ← 段间引导总开关
+  "continuityOverlapFrames": 22     // ← 上下文帧数
+}</code></pre>
+
+  <h3>segments —— 一个镜头</h3>
+<pre><code>{
+  "id": "s1",                    // 唯一即可，前端自己生成
+  "start": 0,                    // 起始帧，= 前面所有段 length 之和
+  "length": 124,                 // 本段帧数，必须落在 17k+5 网格
+  "frameCount": 124,             // 与 length 相同
+  "durationSec": 5,              // 仅供 UI 显示
+  "prompt": "一个猴子在极速奔跑……",
+  "negativePrompt": "bad video",
+  "taskType": "",                // 留空 = 继承 global.taskType
+  "refs": [],                    // r2v 的参考图
+  "refAudios": [],
+  "refVideos": [],
+  "genImage": { "imageFile": "" },// i2v 的起始图
+  "continuityFromPrev": true,    // 是否衔接上一段；第 0 段必须 false
+  "refImageSize": "match"
+}</code></pre>
+
+  <h3>完整示例：5 镜头 + 段间引导（t2v）</h3>
+<pre><code>{
+  "version": 5,
+  "editMode": "segment",
+  "timelineMode": "prompt_batch",
+  "totalFrames": 620,
+  "frameRate": 24,
+  "width": 864,
+  "height": 480,
+  "refMaxSize": 864,
+  "global": {
+    "taskType": "t2v — 文生视频(Text to Video)",
+    "prompt": "",
+    "refs": [], "refAudios": [], "refVideos": [],
+    "genImage": { "imageFile": "" },
+    "continuousReference": false,
+    "commonEnabled": false
+  },
+  "output": {
+    "mode": "fixed",
+    "width": 864, "height": 480, "longEdge": 864,
+    "multiple": 32,
+    "maxExportFrames": 0,
+    "exportMode": "all",
+    "audioMode": "generate",
+    "refImageSize": "match",
+    "continuityEnabled": true,
+    "continuityOverlapFrames": 22
+  },
+  "segments": [
+    { "id": "s1", "start": 0,   "length": 124, "frameCount": 124, "durationSec": 5,
+      "prompt": "镜头一的描述", "negativePrompt": "bad video",
+      "taskType": "", "refs": [], "genImage": { "imageFile": "" },
+      "continuityFromPrev": false, "refImageSize": "match" },
+
+    { "id": "s2", "start": 124, "length": 124, "frameCount": 124, "durationSec": 5,
+      "prompt": "镜头二的描述", "negativePrompt": "bad video",
+      "taskType": "", "refs": [], "genImage": { "imageFile": "" },
+      "continuityFromPrev": true, "refImageSize": "match" },
+
+    { "id": "s3", "start": 248, "length": 124, "frameCount": 124, "durationSec": 5,
+      "prompt": "镜头三的描述", "negativePrompt": "bad video",
+      "taskType": "", "refs": [], "genImage": { "imageFile": "" },
+      "continuityFromPrev": true, "refImageSize": "match" },
+
+    { "id": "s4", "start": 372, "length": 124, "frameCount": 124, "durationSec": 5,
+      "prompt": "镜头四的描述", "negativePrompt": "bad video",
+      "taskType": "", "refs": [], "genImage": { "imageFile": "" },
+      "continuityFromPrev": true, "refImageSize": "match" },
+
+    { "id": "s5", "start": 496, "length": 124, "frameCount": 124, "durationSec": 5,
+      "prompt": "镜头五的描述", "negativePrompt": "bad video",
+      "taskType": "", "refs": [], "genImage": { "imageFile": "" },
+      "continuityFromPrev": true, "refImageSize": "match" }
+  ]
+}</code></pre>
+
+  <div class="callout">
+    <span class="tag">对应关系</span>
+    <p><code>totalFrames = 620 = 124 × 5</code>，同时 node 12 的 <code>total_frames</code> 也要写 <code>620</code>，<code>width</code>/<code>height</code> 写 <code>864</code>/<code>480</code>。三处对不上会按时间轴里的值跑，容易和预期不符。</p>
+  </div>
+
+  <div class="callout warn">
+    <span class="tag">导出文件里的残留字段</span>
+    <p>现有 JSON 的 <code>timeline_data</code> 里还有 <code>keyframes</code>、<code>shots</code>、<code>batchWorkspaces</code>、<code>videoClips</code> 等字段，那是画布 UI 的暂存数据。<strong>前端整条重新生成 timeline_data 即可，不需要保留这些</strong>（fl2v 除外，它要用 <code>shots</code>）。</p>
+  </div>
+</section>
+
+<section id="s6">
+  <h2><span class="num">06</span>帧数换算规则</h2>
+  <p class="lede">MiniMax H3 的帧数必须落在 <strong>17k + 5</strong> 网格上，否则会被强制向上取整，实际时长与请求不符。</p>
+
+<pre><code>function alignFrames(seconds) {
+  let n = Math.max(5, Math.ceil(seconds * 24));
+  while (n % 17 !== 5) n += 1;
+  return n;
+}</code></pre>
+
+  <div class="tw"><table>
+    <thead><tr><th>请求秒数</th><th>原始帧数</th><th>对齐后</th><th>实际时长</th></tr></thead>
+    <tbody>
+      <tr><td>1 秒</td><td>24</td><td><code>39</code></td><td>1.63 秒</td></tr>
+      <tr><td>2 秒</td><td>48</td><td><code>56</code></td><td>2.33 秒</td></tr>
+      <tr><td>3 秒</td><td>72</td><td><code>73</code></td><td>3.04 秒</td></tr>
+      <tr><td>4 秒</td><td>96</td><td><code>107</code></td><td>4.46 秒</td></tr>
+      <tr><td><strong>5 秒</strong></td><td>120</td><td><strong><code>124</code></strong></td><td>5.17 秒</td></tr>
+      <tr><td>6 秒</td><td>144</td><td><code>158</code></td><td>6.58 秒</td></tr>
+    </tbody>
+  </table></div>
+
+  <p>合法值序列：<code>5, 22, 39, 56, 73, 90, 107, 124, 141, 158, 175 …</code></p>
+
+  <div class="callout">
+    <span class="tag">建议</span>
+    <p>前端 UI 上直接给<strong>档位选择</strong>（3 秒 / 5 秒 / 6.5 秒），而不是让用户填任意秒数——否则用户填 4 秒拿到 4.46 秒，会当成 bug 报上来。单段建议不超过 <code>124</code> 帧，更长的内容拆成多段配段间引导，效果和显存都更好。</p>
+  </div>
+</section>
+
+<section id="s7">
+  <h2><span class="num">07</span>段间引导</h2>
+  <p class="lede">把上一段结尾的运动（和音频）钉进下一段的采样起点，让多个镜头看起来是连续的一条镜头，而不是硬切。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th>字段</th><th>位置</th><th>取值</th></tr></thead>
+    <tbody>
+      <tr><td><code>continuityEnabled</code></td><td><code>output</code></td><td><code>true</code> / <code>false</code></td></tr>
+      <tr><td><code>continuityOverlapFrames</code></td><td><code>output</code></td><td><strong>只接受 5 / 22 / 39 / 56</strong>，推荐 <code>22</code></td></tr>
+      <tr><td><code>continuityFromPrev</code></td><td>每个 <code>segment</code></td><td>第 0 段必须 <code>false</code>；其余 <code>true</code> = 衔接，<code>false</code> = 这里硬切</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout warn">
+    <span class="tag">三条硬规则</span>
+    <ul>
+      <li><code>continuityOverlapFrames</code> 填其他数值会被<strong>吸附到最近的档位</strong>，不会报错。填 20 会变成 22，填 30 会变成 39。</li>
+      <li><strong>段数少于 2 时段间引导自动关闭</strong>，单镜头下这两个字段完全无效。</li>
+      <li>上下文帧数越大衔接越顺，但每段的采样长度也会变长（更慢、更吃显存）。<strong>22 是官方基线</strong>，先用它。</li>
+    </ul>
+  </div>
+
+  <h3>混合硬切</h3>
+  <p>想让第 3 个镜头是一次转场硬切、其余保持连贯，只需把 <code>segments[2].continuityFromPrev</code> 设成 <code>false</code>，总开关保持 <code>true</code>。这样 1→2、3→4、4→5 衔接，2→3 硬切。</p>
+</section>
+
+<section id="s8">
+  <h2><span class="num">08</span>单镜头模式</h2>
+  <p class="lede">和多镜头是同一份 JSON、同一个接口，只是 <code>segments</code> 数组里只放一个元素。</p>
+
+<pre><code>"totalFrames": 124,
+"segments": [
+  { "id": "s1", "start": 0, "length": 124, "frameCount": 124, "durationSec": 5,
+    "prompt": "……", "negativePrompt": "bad video",
+    "taskType": "", "refs": [], "genImage": { "imageFile": "" },
+    "continuityFromPrev": false, "refImageSize": "match" }
+]</code></pre>
+
+  <p><code>output.continuityEnabled</code> 留 <code>true</code> 也没关系，段数不足会自动失效。前端不需要为单镜头做特殊分支。</p>
+</section>
+
+<section id="s9">
+  <h2><span class="num">09</span>图片的两种传法</h2>
+  <p class="lede">i2v 和 fl2v 需要传图。两条路都支持，<strong>base64 可以完全省掉上传步骤</strong>。</p>
+
+  <h3>方式 A：先上传，再引用文件名</h3>
+<pre><code>POST http://&lt;host&gt;:8189/upload/image
+Content-Type: multipart/form-data
+  image: &lt;file&gt;
+  type: input
+
+→ { "name": "abc123.jpg", "subfolder": "", "type": "input" }</code></pre>
+  <p>然后把 <code>name</code> 填进 <code>imageFile</code>。</p>
+
+  <h3>方式 B：直接传 base64</h3>
+<pre><code>"genImage": { "imageB64": "data:image/jpeg;base64,/9j/4AAQ..." }</code></pre>
+  <p>不落盘、少一次往返。对前端来说通常更简单。</p>
+
+  <h3>各任务的挂载位置</h3>
+  <div class="tw"><table>
+    <thead><tr><th>任务</th><th>字段路径</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>i2v</td><td><code>segments[i].genImage.imageFile</code><br><code>segments[i].genImage.imageB64</code></td><td>该镜头的起始画面</td></tr>
+      <tr><td>fl2v</td><td><code>shots[i].startImage</code><br><code>shots[i].endImage</code></td><td>各含 <code>imageFile</code> / <code>imageB64</code> / <code>width</code> / <code>height</code>。首帧必传，尾帧可选</td></tr>
+      <tr><td>r2v</td><td><code>segments[i].refs[]</code></td><td>每项 <code>{ "index": 0, "imageFile": "..." }</code>，index 对应提示词里的 <code>&lt;Picture 1&gt;</code>（index 从 0 开始）</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout">
+    <span class="tag">r2v 的提示词引用</span>
+    <p>参考图在提示词里用 <code>&lt;Picture 1&gt;</code>、<code>&lt;Picture 2&gt;</code> 引用，参考视频用 <code>&lt;Video 1&gt;</code>，参考音频用 <code>&lt;Audio 1&gt;</code>。序号从 1 开始，而 <code>refs</code> 数组里的 <code>index</code> 从 0 开始——差一位，前端拼提示词时注意。</p>
+  </div>
+</section>
+
+<section id="s10">
+  <h2><span class="num">10</span>预览版与成片</h2>
+  <p class="lede">同一份 workflow，只改三个数字。<strong>seed 保持不变</strong>，预览和成片的构图才会一致。</p>
+
+  <div class="tw"><table>
+    <thead><tr><th></th><th>width × height</th><th>steps</th><th>seed</th></tr></thead>
+    <tbody>
+      <tr><td><strong>预览</strong></td><td><code>480 × 272</code></td><td><code>8</code></td><td>任务创建时生成，存下来</td></tr>
+      <tr><td><strong>成片</strong></td><td><code>864 × 480</code></td><td><code>20</code></td><td><strong>与预览相同</strong></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="callout warn">
+    <span class="tag">改分辨率要改四处</span>
+    <p>宽高在四个位置出现，必须<strong>全部同步</strong>：</p>
+    <ul>
+      <li><code>node 12.inputs.width</code> / <code>height</code></li>
+      <li><code>timeline_data.width</code> / <code>height</code></li>
+      <li><code>timeline_data.output.width</code> / <code>height</code></li>
+      <li><code>timeline_data.refMaxSize</code>（写长边）</li>
+    </ul>
+    <p>并且宽高都必须是 <strong>32 的倍数</strong>。<code>480 × 272</code> 与 <code>864 × 480</code> 都满足，且比例接近，可以直接对应。</p>
+  </div>
+</section>
+
+<section id="s11">
+  <h2><span class="num">11</span>提交前自检</h2>
+  <p class="lede">后台在拼完 JSON、POST 之前跑一遍这些断言，能挡掉绝大多数线上问题。</p>
+
+  <ul class="check">
+    <li><code>node 12.task_type</code> 与 <code>timeline_data.global.taskType</code> 完全相同</li>
+    <li>每个 <code>segments[i].length % 17 === 5</code></li>
+    <li><code>segments[i].start</code> 等于前面所有段 <code>length</code> 的累加</li>
+    <li><code>totalFrames</code> === 各段 <code>length</code> 之和 === <code>node 12.total_frames</code></li>
+    <li><code>width</code> 和 <code>height</code> 四处一致，且都能被 32 整除</li>
+    <li><code>segments[0].continuityFromPrev === false</code></li>
+    <li><code>continuityOverlapFrames</code> ∈ <code>{5, 22, 39, 56}</code></li>
+    <li><code>clear_vram_between_segments === true</code>（不是空串）</li>
+    <li><code>node 12.inputs</code> 里<strong>没有</strong> <code>refine</code> 字段</li>
+    <li><code>timeline_data</code> 是<strong>字符串</strong>，不是对象</li>
+    <li>i2v / fl2v / r2v：每个镜头的图都挂上了</li>
+  </ul>
+</section>
+
+<section id="s12">
+  <h2><span class="num">12</span>常见错误</h2>
+
+  <div class="tw"><table>
+    <thead><tr><th>现象</th><th>原因</th><th>处理</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>改了 <code>task_type</code> 但跑出来还是旧任务</td>
+        <td>只改了 node 12 的 widget，<code>timeline_data.global.taskType</code> 没跟着改</td>
+        <td>以 <code>timeline_data</code> 为准，两处一起改</td>
+      </tr>
+      <tr>
+        <td>视频比请求的长</td>
+        <td>帧数没对齐 17k+5，被向上取整</td>
+        <td>提交前用 <code>alignFrames()</code> 处理</td>
+      </tr>
+      <tr>
+        <td>多段跑到一半显存溢出</td>
+        <td><code>clear_vram_between_segments</code> 是 <code>false</code> 或空串</td>
+        <td>改成 <code>true</code></td>
+      </tr>
+      <tr>
+        <td>画面全是噪声</td>
+        <td>Turbo LoRA 和 UNET 不配套</td>
+        <td>r2v 用 <code>ref2v_turbo</code>，其余用 <code>fl2v_turbo</code></td>
+      </tr>
+      <tr>
+        <td>镜头之间硬切，没有衔接</td>
+        <td>段数不足 2，或 <code>continuityFromPrev</code> 是 false，或总开关没开</td>
+        <td>查 <code>outputs["8"]</code> 运行报告，里面会写明段间引导实际是 ON 还是 OFF</td>
+      </tr>
+      <tr>
+        <td>提交后没反应、秒返回旧结果</td>
+        <td>整个 prompt 与上次完全一致，命中 ComfyUI 执行缓存</td>
+        <td>正常情况 seed 或提示词会变，不会触发；如需强制重跑，改一下 seed</td>
+      </tr>
+      <tr>
+        <td>r2v 提示词里的 <code>&lt;Picture 2&gt;</code> 不生效</td>
+        <td><code>refs[].index</code> 从 0 开始，提示词序号从 1 开始</td>
+        <td><code>&lt;Picture N&gt;</code> 对应 <code>index = N - 1</code></td>
+      </tr>
+    </tbody>
+  </table></div>
+</section>
+
+<footer>
+  <p>ComfyUI-MinMax-H3-Production-Director · 生成参数与时间轴以 <code>timeline_data</code> 为唯一真源 · 排查问题优先看 <code>outputs["8"]</code> 的运行报告</p>
+</footer>
+
+</div>

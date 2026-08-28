@@ -47,3 +47,4 @@ Refine 示例另把 `images_pre_refine` 接到第二路 `CreateVideo` / `SaveVid
 - 可选接 `refine_model`（二采 UNET）；不接则用导演台主模型
 - `upscale` 默认 `h3_latent`：在 Refine 节点 `upscale_method` 下方下拉选 3D 权重（`mode=latent_upscale` 时同样出现）。权重放 `ComfyUI/models/latent_upscale_models/`。`lanczos` 可另接 `upscale_model`（RealESRGAN 等），不接则纯插值；也可改 `nvidia_rtx_vsr`
 - fl2v 默认跳过二采；关掉 `skip_fl2v` 才会采首尾帧镜头
+- `confirm_first_pass`（先确认一采）：开启后第一次 Queue 只跑一采并写 `_pre.mp4` + 一采缓存；确认后把 seed 设为 `fixed`、用同一 seed 再 Queue，就跳过一采直接二采。默认关（行为与之前一致）

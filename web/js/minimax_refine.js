@@ -128,6 +128,7 @@ function orderRefineWidgets(node) {
         "width",
         "height",
         "skip_fl2v",
+        "confirm_first_pass",
     ];
     const byName = new Map(widgets.map((w) => [w.name, w]));
     const ordered = [];
@@ -239,6 +240,8 @@ function syncRefineWidgetVisibility(node) {
     setWidgetVisible(node, "sampler", !latentOnly);
     setWidgetVisible(node, "passes", !latentOnly);
     setWidgetVisible(node, "seed_mode", !latentOnly);
+    // latent_upscale 不二采 → 「先确认一采」无意义。
+    setWidgetVisible(node, "confirm_first_pass", !latentOnly);
     setWidgetVisible(node, "target_width", false);
     setWidgetVisible(node, "target_height", false);
     orderRefineWidgets(node);

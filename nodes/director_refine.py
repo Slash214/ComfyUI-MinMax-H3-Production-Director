@@ -192,6 +192,18 @@ class MiniMaxH3DirectorRefine:
                         ),
                     },
                 ),
+                "confirm_first_pass": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "先确认一采再二采。默认关：一采完立刻二采（与现在相同）。"
+                            "开：没有一采缓存时只跑一采并写出缓存/_pre.mp4；"
+                            "已有精确匹配的一采缓存（同一 seed 及一采参数）则跳过一采只跑二采。"
+                            "seed 请用 fixed，或第二次 Queue 前改回写出缓存时的 seed。"
+                        ),
+                    },
+                ),
             },
         }
 
@@ -212,7 +224,9 @@ class MiniMaxH3DirectorRefine:
         "Upscale / latent_upscale canvas uses the same aspect + megapixels / custom W×H as Director. "
         "Director first-pass stays at its own resolution; Refine target is the enlarge size. "
         "width / height are the resolved target canvas (×32). "
-        "Does not sample by itself — no IMAGE output."
+        "Does not sample by itself — no IMAGE output. "
+        "confirm_first_pass: first Queue writes first-pass cache; "
+        "second Queue with the same seed runs refine only."
     )
 
     def pack(
@@ -227,6 +241,7 @@ class MiniMaxH3DirectorRefine:
         width=1280,
         height=720,
         skip_fl2v=True,
+        confirm_first_pass=False,
         latent_upscale_model=None,
         upscale_model=None,
         h3_latent_model="",
@@ -273,6 +288,7 @@ class MiniMaxH3DirectorRefine:
             target_width=target_width,
             target_height=target_height,
             skip_fl2v=skip_fl2v,
+            confirm_first_pass=bool(confirm_first_pass),
             upscale_method=upscale_method,
             sample_model=refine_model if refine_model is not None else model,
             latent_upscale_model=latent_upscale_model if latent_upscale_model is not None else h3_latent_model,

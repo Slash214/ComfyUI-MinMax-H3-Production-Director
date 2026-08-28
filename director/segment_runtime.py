@@ -28,8 +28,9 @@ def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
     if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
         return seg.source_clip.clone()
 
-    # Pure t2v (incl. external groups) has no source frames.
-    if getattr(seg, "task_key", "") == "t2v":
+    # t2v/r2v (including external groups) have no source frames. Never slice
+    # the small index-only placeholder stored in a generation plan.
+    if getattr(seg, "task_key", "") in {"t2v", "r2v"}:
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
     # fl2v end-only: plan leaves source_clip=None on purpose. Do not slice the
@@ -69,6 +70,9 @@ def resolve_segment_raw_clip_with_lookahead(
     if seg.source_clip is not None and seg.source_clip.shape[0] > 0:
         # Gen canvases have no timeline lookahead beyond the clip itself.
         return seg.source_clip.clone()
+
+    if getattr(seg, "task_key", "") in {"t2v", "r2v"}:
+        return torch.zeros((0, 16, 16, 3), dtype=torch.float32)
 
     if getattr(seg, "task_key", "") == "fl2v" and is_gen_timeline_plan(plan):
         return torch.zeros((0, 16, 16, 3), dtype=torch.float32)

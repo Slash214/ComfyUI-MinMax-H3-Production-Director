@@ -88,8 +88,8 @@ def _cache_root(node_id: str) -> Path | None:
         return None
 
 
-def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
-    """Stable identity for a segment 鈥?cache invalidates when edit params change."""
+def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
+    """Identity that affects first-pass sampling (no Refine settings)."""
     ref_files = sorted(
         f"img{ref.index}:{(getattr(ref, 'image_file', '') or '')}"
         for ref in seg.refs
@@ -132,6 +132,28 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         # Bump CONTINUITY_PIPELINE_ID when sampling/handoff semantics change.
         "continuity_pipeline": CONTINUITY_PIPELINE_ID,
     }
+    return fp
+
+
+def first_pass_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
+    """Exact-match key for first-pass AV latent. Refine knobs are excluded."""
+    fp = _segment_identity_fingerprint(seg, plan)
+    fp.update({
+        "kind": "first_pass",
+        "seed": int(getattr(plan, "sample_seed", 0) or 0),
+        "cfg": round(float(getattr(plan, "sample_cfg", 1.0) or 1.0), 6),
+        "steps": int(getattr(plan, "sample_steps", 25) or 25),
+        "sampler": str(getattr(plan, "sample_sampler", "") or ""),
+        "scheduler": str(getattr(plan, "sample_scheduler", "") or ""),
+        "shift_video": round(float(getattr(plan, "sample_shift_video", 12.0) or 12.0), 6),
+        "shift_audio": round(float(getattr(plan, "sample_shift_audio", 3.0) or 3.0), 6),
+    })
+    return fp
+
+
+def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
+    """Stable identity for a segment — cache invalidates when edit params change."""
+    fp = _segment_identity_fingerprint(seg, plan)
     from .refine_pack import refine_fingerprint
 
     fp.update(refine_fingerprint(plan))
@@ -487,4 +509,117 @@ def load_segment_audio(
         return {"waveform": wave.contiguous(), "sample_rate": sr}
     except Exception as exc:
         log.warning("Failed to load segment %d audio cache: %s", seg.index + 1, exc)
+        return None
+
+
+def save_first_pass_cache(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    av_latent: dict | None = None,
+    frames: torch.Tensor | None = None,
+    handoff: dict[str, Any] | None = None,
+) -> None:
+    """Persist first-pass AV latent for confirm-then-refine. Never raises."""
+    if not node_id:
+        return
+    if av_latent is None or not isinstance(av_latent, dict) or "samples" not in av_latent:
+        return
+    root = _cache_root(node_id)
+    if root is None:
+        return
+    fp = first_pass_cache_fingerprint(seg, plan)
+    idx = seg.index
+    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
+    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
+    frames_path = root / f"seg_{idx:04d}.pre.pt"
+    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    try:
+        cpu_latent = _av_latent_to_cpu(av_latent)
+        _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
+        text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
+        _write_via_temp(meta_path, lambda p: p.write_text(text, encoding="utf-8"))
+        if handoff:
+            _write_via_temp(
+                handoff_path,
+                lambda p: p.write_text(
+                    json.dumps(handoff, ensure_ascii=False, sort_keys=True),
+                    encoding="utf-8",
+                ),
+            )
+        if isinstance(frames, torch.Tensor) and frames.numel() > 0:
+            payload = frames.detach().cpu().float().contiguous()
+            _write_via_temp(frames_path, lambda p: torch.save(payload, p))
+        log.debug(
+            "Cached first-pass segment %d for node %s (seed=%s)",
+            idx + 1,
+            node_id,
+            fp.get("seed"),
+        )
+    except Exception as exc:
+        log.warning(
+            "Segment %d first-pass cache write skipped (%s).",
+            idx + 1,
+            exc,
+        )
+        for stray in root.glob(f".seg_{idx:04d}.pre.*"):
+            _safe_unlink(stray)
+
+
+def load_first_pass_cache(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+) -> dict[str, Any] | None:
+    """Load first-pass cache only on exact fingerprint match. Never stale."""
+    if not node_id:
+        return None
+    root = _cache_root(node_id)
+    if root is None:
+        return None
+    idx = seg.index
+    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
+    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
+    frames_path = root / f"seg_{idx:04d}.pre.pt"
+    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    if not meta_path.is_file() or not latent_path.is_file():
+        return None
+    try:
+        stored = json.loads(meta_path.read_text(encoding="utf-8"))
+        expected = first_pass_cache_fingerprint(seg, plan)
+        if not isinstance(stored, dict) or stored != expected:
+            if isinstance(stored, dict) and _reject_source_stale(
+                stored, expected, seg_index=idx, quiet=True,
+            ):
+                return None
+            diff = _fingerprint_diff_keys(stored, expected) if isinstance(stored, dict) else ["<invalid-meta>"]
+            log.info(
+                "Segment %d first-pass cache miss (diff=%s); will sample first pass.",
+                idx + 1,
+                diff[:8],
+            )
+            return None
+        payload = torch.load(latent_path, map_location="cpu", weights_only=False)
+        if not isinstance(payload, dict) or "samples" not in payload:
+            return None
+        frames = None
+        if frames_path.is_file():
+            try:
+                loaded = torch.load(frames_path, map_location="cpu", weights_only=True)
+                if isinstance(loaded, torch.Tensor) and loaded.numel() > 0:
+                    frames = loaded.float()
+            except Exception as exc:
+                log.debug("Segment %d first-pass frames skipped: %s", idx + 1, exc)
+        handoff: dict[str, Any] = {}
+        if handoff_path.is_file():
+            try:
+                data = json.loads(handoff_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    handoff = data
+            except Exception:
+                handoff = {}
+        return {"av_latent": payload, "frames": frames, "handoff": handoff}
+    except Exception as exc:
+        log.warning("Failed to load segment %d first-pass cache: %s", idx + 1, exc)
         return None

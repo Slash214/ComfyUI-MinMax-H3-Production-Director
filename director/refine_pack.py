@@ -268,6 +268,7 @@ def pack_refine(
     upscale_model=None,
     sampler: str = "",
     sigmas=None,
+    confirm_first_pass: bool = False,
 ) -> dict[str, Any]:
     mode = str(mode or "refine").strip().lower()
     if mode not in REFINE_MODES:
@@ -318,6 +319,7 @@ def pack_refine(
         "sigmas_parsed": parsed,
         "sigmas_tensor": sigma_tensor,
         "has_sigmas_tensor": sigma_tensor is not None,
+        "confirm_first_pass": bool(confirm_first_pass),
     }
 
 
@@ -401,7 +403,14 @@ def normalize_refine_pack(
         "sigmas_parsed": parsed,
         "sigmas_tensor": sigma_tensor,
         "has_sigmas_tensor": sigma_tensor is not None,
+        "confirm_first_pass": bool(raw.get("confirm_first_pass", False)),
     }
+
+
+def confirm_first_pass_enabled(plan) -> bool:
+    """True when Refine is connected and「先确认一采」is on."""
+    pack = getattr(plan, "refine", None)
+    return isinstance(pack, dict) and bool(pack.get("enabled")) and bool(pack.get("confirm_first_pass"))
 
 
 def refine_will_sample(plan, seg) -> bool:
@@ -493,10 +502,14 @@ def refine_report_line(plan) -> str | None:
     sampler = pack.get("sampler") or DEFAULT_REFINE_SIGMA_SAMPLER
     n_steps = max(1, len(parsed) - 1) if parsed else 0
     if mode == "latent_upscale":
-        return f"Refine: ON ({mode}{model_note}{extra})"
-    how = f"sigmas {sampler}" if wired else "sigmas 未接线"
-    step_note = f" {n_steps}-step" if n_steps else ""
-    return (
-        f"Refine: ON ({mode}, {how}{step_note}"
-        f"{pass_note}{model_note}{extra})"
-    )
+        line = f"Refine: ON ({mode}{model_note}{extra})"
+    else:
+        how = f"sigmas {sampler}" if wired else "sigmas 未接线"
+        step_note = f" {n_steps}-step" if n_steps else ""
+        line = (
+            f"Refine: ON ({mode}, {how}{step_note}"
+            f"{pass_note}{model_note}{extra})"
+        )
+    if pack.get("confirm_first_pass"):
+        line += " — 先确认一采（无缓存只一采，有缓存则二采）"
+    return line
