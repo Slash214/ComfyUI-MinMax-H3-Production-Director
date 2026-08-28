@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -88,8 +89,8 @@ def _cache_root(node_id: str) -> Path | None:
         return None
 
 
-def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
-    """Stable identity for a segment 鈥?cache invalidates when edit params change."""
+def _segment_identity_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
+    """Identity that affects first-pass sampling (no Refine settings)."""
     ref_files = sorted(
         f"img{ref.index}:{(getattr(ref, 'image_file', '') or '')}"
         for ref in seg.refs
@@ -107,7 +108,7 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         or seg.reference_video_meta.get("fileName")
         or ""
     ).strip()
-    fp = {
+    return {
         "index": seg.index,
         "start": seg.start_frame,
         "end": seg.end_frame,
@@ -129,9 +130,29 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "continuity": plan.continuity_enabled,
         "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
         "continuity_from_prev": bool(getattr(seg, "continuity_from_prev", True)),
-        # Bump CONTINUITY_PIPELINE_ID when sampling/handoff semantics change.
         "continuity_pipeline": CONTINUITY_PIPELINE_ID,
     }
+
+
+def first_pass_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
+    """Exact-match key for first-pass AV latent. Refine knobs are excluded."""
+    fp = _segment_identity_fingerprint(seg, plan)
+    fp.update({
+        "kind": "first_pass",
+        "seed": int(getattr(plan, "sample_seed", 0) or 0),
+        "cfg": round(float(getattr(plan, "sample_cfg", 1.0) or 1.0), 6),
+        "steps": int(getattr(plan, "sample_steps", 25) or 25),
+        "sampler": str(getattr(plan, "sample_sampler", "") or ""),
+        "scheduler": str(getattr(plan, "sample_scheduler", "") or ""),
+        "shift_video": round(float(getattr(plan, "sample_shift_video", 12.0) or 12.0), 6),
+        "shift_audio": round(float(getattr(plan, "sample_shift_audio", 3.0) or 3.0), 6),
+    })
+    return fp
+
+
+def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str, Any]:
+    """Stable identity for a segment — cache invalidates when edit params change."""
+    fp = _segment_identity_fingerprint(seg, plan)
     from .refine_pack import refine_fingerprint
 
     fp.update(refine_fingerprint(plan))
@@ -194,6 +215,23 @@ def _audio_payload_to_cpu(audio: dict[str, Any] | None) -> dict[str, Any] | None
     }
 
 
+def _frames_to_disk(tensor: torch.Tensor) -> torch.Tensor:
+    """Store pixel frames as uint8 [0,255]. Export is 8-bit anyway; float32 is 4× larger."""
+    x = tensor.detach().cpu()
+    if x.dtype == torch.uint8:
+        return x.contiguous()
+    return x.float().clamp(0, 1).mul(255).round().clamp(0, 255).to(torch.uint8).contiguous()
+
+
+def _frames_from_disk(loaded: Any) -> torch.Tensor | None:
+    """Restore uint8 cache to float32 [0,1]; pass through legacy float caches."""
+    if not isinstance(loaded, torch.Tensor):
+        return None
+    if loaded.dtype == torch.uint8:
+        return loaded.float().div(255.0)
+    return loaded.float()
+
+
 def save_segment_cache(
     node_id: str | None,
     seg: SegmentPlan,
@@ -226,7 +264,7 @@ def save_segment_cache(
     handoff_path = root / f"seg_{idx:04d}.handoff.json"
     audio_path = root / f"seg_{idx:04d}.audio.pt"
     try:
-        payload = tensor.cpu().float().contiguous()
+        payload = _frames_to_disk(tensor)
         _write_via_temp(pt_path, lambda p: torch.save(payload, p))
         text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
         _write_via_temp(
@@ -452,7 +490,9 @@ def load_segment_cache(
                 "Segment %d: using cache without meta for export fill.",
                 idx + 1,
             )
-        return torch.load(tensor_path, map_location="cpu", weights_only=True)
+        return _frames_from_disk(
+            torch.load(tensor_path, map_location="cpu", weights_only=True)
+        )
     except Exception as exc:
         log.warning("Failed to load segment %d cache: %s", idx + 1, exc)
         return None
@@ -488,3 +528,268 @@ def load_segment_audio(
     except Exception as exc:
         log.warning("Failed to load segment %d audio cache: %s", seg.index + 1, exc)
         return None
+
+
+def save_first_pass_cache(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+    *,
+    av_latent: dict | None = None,
+    frames: torch.Tensor | None = None,
+    handoff: dict[str, Any] | None = None,
+) -> None:
+    """Persist first-pass AV latent for confirm-then-refine. Never raises."""
+    if not node_id:
+        return
+    if av_latent is None or not isinstance(av_latent, dict) or "samples" not in av_latent:
+        return
+    root = _cache_root(node_id)
+    if root is None:
+        return
+    fp = first_pass_cache_fingerprint(seg, plan)
+    idx = seg.index
+    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
+    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
+    frames_path = root / f"seg_{idx:04d}.pre.pt"
+    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    try:
+        cpu_latent = _av_latent_to_cpu(av_latent)
+        _write_via_temp(latent_path, lambda p: torch.save(cpu_latent, p))
+        text = json.dumps(fp, ensure_ascii=False, sort_keys=True)
+        _write_via_temp(meta_path, lambda p: p.write_text(text, encoding="utf-8"))
+        if handoff:
+            _write_via_temp(
+                handoff_path,
+                lambda p: p.write_text(
+                    json.dumps(handoff, ensure_ascii=False, sort_keys=True),
+                    encoding="utf-8",
+                ),
+            )
+        if isinstance(frames, torch.Tensor) and frames.numel() > 0:
+            payload = _frames_to_disk(frames)
+            _write_via_temp(frames_path, lambda p: torch.save(payload, p))
+        log.debug(
+            "Cached first-pass segment %d for node %s (seed=%s)",
+            idx + 1,
+            node_id,
+            fp.get("seed"),
+        )
+    except Exception as exc:
+        log.warning(
+            "Segment %d first-pass cache write skipped (%s).",
+            idx + 1,
+            exc,
+        )
+        for stray in root.glob(f".seg_{idx:04d}.pre.*"):
+            _safe_unlink(stray)
+
+
+def load_first_pass_cache(
+    node_id: str | None,
+    seg: SegmentPlan,
+    plan: DirectorPlan,
+) -> dict[str, Any] | None:
+    """Load first-pass cache only on exact fingerprint match. Never stale."""
+    if not node_id:
+        return None
+    root = _cache_root(node_id)
+    if root is None:
+        return None
+    idx = seg.index
+    meta_path = root / f"seg_{idx:04d}.pre.meta.json"
+    latent_path = root / f"seg_{idx:04d}.pre.av.pt"
+    frames_path = root / f"seg_{idx:04d}.pre.pt"
+    handoff_path = root / f"seg_{idx:04d}.pre.handoff.json"
+    if not meta_path.is_file() or not latent_path.is_file():
+        return None
+    try:
+        stored = json.loads(meta_path.read_text(encoding="utf-8"))
+        expected = first_pass_cache_fingerprint(seg, plan)
+        if not isinstance(stored, dict) or stored != expected:
+            if isinstance(stored, dict) and _reject_source_stale(
+                stored, expected, seg_index=idx, quiet=True,
+            ):
+                return None
+            diff = _fingerprint_diff_keys(stored, expected) if isinstance(stored, dict) else ["<invalid-meta>"]
+            log.info(
+                "Segment %d first-pass cache miss (diff=%s); will sample first pass.",
+                idx + 1,
+                diff[:8],
+            )
+            return None
+        payload = torch.load(latent_path, map_location="cpu", weights_only=False)
+        if not isinstance(payload, dict) or "samples" not in payload:
+            return None
+        frames = None
+        if frames_path.is_file():
+            try:
+                loaded = torch.load(frames_path, map_location="cpu", weights_only=True)
+                if isinstance(loaded, torch.Tensor) and loaded.numel() > 0:
+                    frames = _frames_from_disk(loaded)
+            except Exception as exc:
+                log.debug("Segment %d first-pass frames skipped: %s", idx + 1, exc)
+        handoff: dict[str, Any] = {}
+        if handoff_path.is_file():
+            try:
+                data = json.loads(handoff_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    handoff = data
+            except Exception:
+                handoff = {}
+        return {"av_latent": payload, "frames": frames, "handoff": handoff}
+    except Exception as exc:
+        log.warning("Failed to load segment %d first-pass cache: %s", idx + 1, exc)
+        return None
+
+
+_SEG_CACHE_FILE_RE = re.compile(r"^seg_(\d+)\.")
+
+
+def prune_segment_cache(node_id: str | None, valid_indices) -> None:
+    """Remove ``seg_XXXX.*`` files whose index is no longer on the timeline.
+
+    Does not create the cache dir. Uses all current segment indices (not
+    「选择运行」), so unselected slots keep merge/export fill. Never raises.
+    """
+    if not node_id:
+        return
+    try:
+        root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+        if not root.is_dir():
+            return
+        valid = {int(i) for i in valid_indices}
+        removed = 0
+        for path in root.iterdir():
+            if not path.is_file():
+                continue
+            m = _SEG_CACHE_FILE_RE.match(path.name)
+            if not m or int(m.group(1)) in valid:
+                continue
+            if _safe_unlink(path):
+                removed += 1
+        if removed:
+            log.info(
+                "Segment cache pruned %d stale file(s) for node %s.", removed, node_id
+            )
+    except Exception as exc:
+        log.debug("Segment cache prune skipped (%s).", exc)
+
+
+def first_pass_cache_disk_signature(node_id: str | None) -> str:
+    """Fingerprint confirm-first-pass ``*.pre.*`` files without creating the cache dir.
+
+    Director ``IS_CHANGED`` cannot see the linked Refine pack (ComfyUI only
+    forwards widgets). These ``.pre`` files are written only by the confirmation
+    hold, so a second Queue observes a new signature and continues into refine.
+    """
+    if not node_id:
+        return ""
+    root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+    if not root.is_dir():
+        return ""
+    parts: list[str] = []
+    try:
+        for path in sorted(root.glob("seg_*.pre.*")):
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            parts.append(f"{path.name}:{int(st.st_mtime_ns)}:{int(st.st_size)}")
+    except OSError:
+        return ""
+    return "|".join(parts)
+
+
+def inspect_first_pass_cache(
+    node_id: str | None,
+    plan: DirectorPlan,
+) -> dict[str, Any]:
+    """Inspect first-pass cache files without loading their tensor payloads."""
+    current_seed = int(getattr(plan, "sample_seed", 0) or 0)
+    result: dict[str, Any] = {
+        "exists": False,
+        "matches": False,
+        "current_seed": current_seed,
+        "cached_seeds": [],
+        "segment_total": 0,
+        "cached_count": 0,
+        "matched_count": 0,
+        "diff_keys": [],
+        "segments": [],
+    }
+    if not node_id:
+        return result
+
+    root = Path(folder_paths.get_output_directory()) / "minimax_seg_cache" / str(node_id)
+    all_segments = list(getattr(plan, "segments", None) or [])
+    run_indices = getattr(plan, "run_indices", None)
+    if run_indices is None:
+        selected = all_segments
+    else:
+        selected = [
+            all_segments[i]
+            for i in sorted(run_indices)
+            if 0 <= i < len(all_segments)
+        ]
+    result["segment_total"] = len(selected)
+
+    cached_seeds: set[int] = set()
+    all_diffs: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for seg in selected:
+        idx = int(seg.index)
+        meta_path = root / f"seg_{idx:04d}.pre.meta.json"
+        latent_path = root / f"seg_{idx:04d}.pre.av.pt"
+        meta_exists = meta_path.is_file()
+        latent_exists = latent_path.is_file()
+        cache_exists = meta_exists and latent_exists
+        stored: Any = None
+        read_error = ""
+        if meta_exists:
+            try:
+                stored = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                read_error = str(exc)
+
+        expected = first_pass_cache_fingerprint(seg, plan)
+        matches = bool(cache_exists and isinstance(stored, dict) and stored == expected)
+        diff = (
+            _fingerprint_diff_keys(stored, expected)
+            if isinstance(stored, dict)
+            else (["<invalid-meta>"] if meta_exists else ["<missing-cache>"])
+        )
+        cached_seed = stored.get("seed") if isinstance(stored, dict) else None
+        try:
+            if cached_seed is not None:
+                cached_seed = int(cached_seed)
+                cached_seeds.add(cached_seed)
+        except (TypeError, ValueError):
+            cached_seed = None
+        all_diffs.update(diff)
+        rows.append(
+            {
+                "segment": idx + 1,
+                "exists": cache_exists,
+                "matches": matches,
+                "cached_seed": cached_seed,
+                "diff_keys": diff,
+                "error": read_error,
+            }
+        )
+
+    cached_count = sum(1 for row in rows if row["exists"])
+    matched_count = sum(1 for row in rows if row["matches"])
+    total = len(rows)
+    result.update(
+        {
+            "exists": cached_count > 0,
+            "matches": total > 0 and matched_count == total,
+            "cached_seeds": sorted(cached_seeds),
+            "cached_count": cached_count,
+            "matched_count": matched_count,
+            "diff_keys": sorted(all_diffs),
+            "segments": rows,
+        }
+    )
+    return result

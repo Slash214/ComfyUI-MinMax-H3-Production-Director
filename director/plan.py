@@ -192,6 +192,14 @@ class DirectorPlan:
     continuity_overlap_frames: int = 0
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
     refine: dict | None = None
+    # Sampling knobs stamped at execute time (first-pass cache fingerprint).
+    sample_seed: int = 0
+    sample_cfg: float = 1.0
+    sample_steps: int = 25
+    sample_sampler: str = ""
+    sample_scheduler: str = ""
+    sample_shift_video: float = 12.0
+    sample_shift_audio: float = 3.0
 
     @property
     def segment_count(self) -> int:
