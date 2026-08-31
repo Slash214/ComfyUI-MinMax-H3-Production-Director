@@ -15,6 +15,7 @@ from ..nodes.conditioning import run_minimax_conditioning
 from .core_sampling import sample_single_stage
 from .refine_pack import (
     confirm_first_pass_enabled,
+    first_pass_sigmas_override,
     refine_needs_canvas,
     refine_passes_for,
     refine_will_sample,
@@ -93,6 +94,23 @@ from .memory_policy import (
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
 
 
+def _segment_disk_cache_needed(
+    plan: DirectorPlan,
+    *,
+    timeline_seg_total: int,
+    will_refine: bool,
+    hold_after_first: bool,
+) -> bool:
+    """Disk cache is for partial re-run / refine / continuity — not single-shot r2v."""
+    if will_refine or hold_after_first:
+        return True
+    if plan.continuity_enabled:
+        return True
+    if len(plan.segments) > 1 or int(timeline_seg_total) > 1:
+        return True
+    return False
+
+
 def _unpack_node_output(out):
     if hasattr(out, "args"):
         args = out.args
@@ -104,12 +122,14 @@ def _unpack_node_output(out):
 
 
 def _decode_av_latent(samples, vae, audio_vae, *, decode_audio: bool = True):
-    from comfy_extras.nodes_lt import LTXVSeparateAVLatent
+    """Same as official r2v: VAEDecode + VAEDecodeAudio both take the AV latent.
+
+    VAEDecode unbinds the video stream; VAEDecodeAudio unbinds the audio stream.
+    Official VAE already writes pixels to ``intermediate_device()`` (CPU by default).
+    """
     from nodes import VAEDecode
 
-    sep = LTXVSeparateAVLatent.execute(samples)
-    video_latent, audio_latent = _unpack_node_output(sep)[:2]
-    images, = VAEDecode().decode(vae, video_latent)
+    images, = VAEDecode().decode(vae, samples)
     if not decode_audio or audio_vae is None:
         return images, empty_audio_dict()
     try:
@@ -117,7 +137,7 @@ def _decode_av_latent(samples, vae, audio_vae, *, decode_audio: bool = True):
     except ImportError:
         from comfy_extras.nodes_lt import VAEDecodeAudio  # type: ignore
 
-    audio_out = VAEDecodeAudio.execute(audio_vae, audio_latent)
+    audio_out = VAEDecodeAudio.execute(audio_vae, samples)
     audio = _unpack_node_output(audio_out)[0]
     return images, audio
 
@@ -296,6 +316,7 @@ def execute_director_plan_core(
     steps: int = 25,
     sampler: str = "res_multistep",
     scheduler: str = "simple",
+    sigmas=None,
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
     clear_vram_between_segments: bool = True,
@@ -322,13 +343,17 @@ def execute_director_plan_core(
     plan.sample_steps = int(steps)
     plan.sample_sampler = str(sampler or "")
     plan.sample_scheduler = str(scheduler or "")
+    first_pass_sigmas = first_pass_sigmas_override(sigmas)
+    plan.sample_sigmas = first_pass_sigmas
+    plan.sample_sigmas_linked = first_pass_sigmas is not None
     plan.sample_shift_video = float(shift_video)
     plan.sample_shift_audio = float(shift_audio)
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
-    # UI toggle on the player bar (timeline.liveTaePreview); default on.
-    raw_live = (plan.raw or {}).get("liveTaePreview", (plan.raw or {}).get("live_tae_preview", True))
-    live_tae_preview = False if raw_live in (False, 0, "0", "false", "False", "off") else True
+    # UI toggle on the player bar (timeline.liveTaePreview); default off.
+    # When off: skip step TAE and the post-sample full-segment JPEG playback encode.
+    raw_live = (plan.raw or {}).get("liveTaePreview", (plan.raw or {}).get("live_tae_preview", False))
+    live_tae_preview = raw_live in (True, 1, "1", "true", "True", "on")
 
     all_segments = plan.segments
     # Drop caches for deleted/shortened timelines. Use every segment index (not
@@ -358,12 +383,32 @@ def execute_director_plan_core(
     segment_audios: list[dict[str, Any]] = []
     skipped_no_cache: list[int] = []
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
+    if first_pass_sigmas is not None:
+        sigma_steps = max(0, len(first_pass_sigmas) - 1)
+        reports.append(
+            f"Sample: 外接 SIGMAS（{sigma_steps} 步）→ MiniMaxH3SigmaShift(model) → "
+            "BasicGuider/CFGGuider → SamplerCustomAdvanced。"
+            "导演台步数/调度器已忽略。"
+        )
+    else:
+        if sigmas is not None:
+            reports.append(
+                "Sample: 外接 SIGMAS 无效（至少需要 2 个数），回退步数 + 调度器。"
+            )
+        reports.append(
+            "Sample: official MiniMaxH3SigmaShift → BasicScheduler → "
+            "BasicGuider/CFGGuider → SamplerCustomAdvanced."
+        )
     # One timestamp folder per execute so all segments of this run stay together.
     mp4_run_dir = new_segment_mp4_run_dir(plan)
     if mp4_run_dir is not None:
         reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
+    if live_tae_preview:
+        reports.append("Live preview: ON — 采样 TAE + 成片后整段 JPEG 播放。")
+    else:
+        reports.append("Live preview: OFF — 跳过 TAE 与成片 JPEG（节点内不播放）。")
     if clear_vram_between_segments:
-        reports.append("VRAM: 段间清理显存已开启。")
+        reports.append("VRAM: 段间清理显存已开启（最后一段不清理）。")
     if memory_debug:
         reports.append(
             f"Memory debug: ON (strategy={mem.memory_strategy}, observe-only Phase 1)."
@@ -652,6 +697,7 @@ def execute_director_plan_core(
             raise ValueError("r2v/v2v/rv2v / reference conditioning requires audio_vae input.")
 
         # Always build via official MiniMaxH3ImageToVideo / ReferenceToVideo.
+        t_cond = time.perf_counter()
         positive, negative, latent, task_hint = run_minimax_conditioning(
             clip=clip,
             vae=vae,
@@ -669,6 +715,7 @@ def execute_director_plan_core(
             ref_audios=ref_audios,
             ref_image_size=resolve_ref_image_size(seg, plan),
         )
+        cond_s = time.perf_counter() - t_cond
 
         trim_frames = 0
         if use_motion_context:
@@ -868,11 +915,14 @@ def execute_director_plan_core(
             phase="context_encode", phase_value=1, phase_max=1, **meta,
         )
 
-        if clear_vram_between_segments:
+        # Multi-segment runs may retain the previous conditioning/decoder
+        # workspace. Route cleanup through the RAM-aware policy; single-shot
+        # runs only need the targeted text-encoder release below.
+        if clear_vram_between_segments and seg_total > 1:
             segment_vram_cleanup(
                 strategy=mem.memory_strategy,
                 enabled=True,
-                unload_models=seg_total > 1,
+                unload_models=True,
             )
 
         # Conditioning is done — the ~15GB text encoder is dead weight from here
@@ -912,6 +962,7 @@ def execute_director_plan_core(
         # Token count + resident model dump for the first pass, so the refine
         # numbers below have a baseline to be compared against.
         mem.probe("First Sampling (pre)", latent=latent, models=True, model=model)
+        t_sample = time.perf_counter()
         if skip_first_sample:
             samples = pre_cache["av_latent"]
             cached_h = pre_cache.get("handoff") or {}
@@ -936,6 +987,7 @@ def execute_director_plan_core(
                 scheduler=scheduler,
                 shift_video=shift_video,
                 shift_audio=shift_audio,
+                sigmas=first_pass_sigmas,
                 on_phase=_report_sample_phase,
                 on_step_preview=_report_step_preview if live_tae_preview else None,
                 preview_every=1,
@@ -1121,6 +1173,7 @@ def execute_director_plan_core(
         if first_pass_gpu is not None:
             del first_pass_gpu
             first_pass_gpu = None
+        sample_s = time.perf_counter() - t_sample
 
         if defer_pre_decode and first_pass_latent_for_defer is not None and pre_export is None:
             try:
@@ -1163,6 +1216,7 @@ def execute_director_plan_core(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=0, phase_max=1, **meta,
         )
+        t_decode = time.perf_counter()
         mem.checkpoint("Before Final VAE Decode")
         decoded, audio_dict = _decode_av_latent_timed(
             samples,
@@ -1190,12 +1244,16 @@ def execute_director_plan_core(
 
         if mem.enabled:
             mem.timing("Final Video Transfer Start")
-        chunk = decoded.cpu().float()
+        chunk = decoded
+        if getattr(chunk, "device", None) is not None and chunk.device.type != "cpu":
+            chunk = chunk.cpu()
+        if chunk.dtype != torch.float32:
+            chunk = chunk.float()
         if mem.enabled:
             mem.timing("Final Video Transfer End")
         mem.track_copy(
             label="chunk",
-            op="decoded.cpu().float()",
+            op="decoded -> conditional cpu/float32",
             src=decoded,
             result=chunk,
         )
@@ -1207,10 +1265,14 @@ def execute_director_plan_core(
                 export_len=export_len,
                 plan=plan,
             )
-            pre_chunk = pre_export.cpu().float()
+            pre_chunk = pre_export
+            if getattr(pre_chunk, "device", None) is not None and pre_chunk.device.type != "cpu":
+                pre_chunk = pre_chunk.cpu()
+            if pre_chunk.dtype != torch.float32:
+                pre_chunk = pre_chunk.float()
             mem.track_copy(
                 label="pre_chunk",
-                op="pre_export.cpu().float()",
+                op="pre_export -> conditional cpu/float32",
                 src=pre_export,
                 result=pre_chunk,
             )
@@ -1228,6 +1290,7 @@ def execute_director_plan_core(
                 strategy=mem.memory_strategy,
                 reason="post_final_decode",
             )
+        decode_s = time.perf_counter() - t_decode
         handoff = {
             "trim_frames": int(trim_frames),
             "export_frames": int(chunk.shape[0]),
@@ -1239,15 +1302,24 @@ def execute_director_plan_core(
         completed_av_handoff[seg.index] = handoff
         if isinstance(audio_dict, dict) and audio_dict.get("waveform") is not None:
             completed_audios[seg.index] = audio_dict
-        save_segment_cache(
-            node_id,
-            seg,
+        write_cache = _segment_disk_cache_needed(
             plan,
-            chunk,
-            av_latent=samples,
-            handoff=handoff,
-            audio=audio_dict if isinstance(audio_dict, dict) else None,
+            timeline_seg_total=timeline_seg_total,
+            will_refine=will_refine,
+            hold_after_first=hold_after_first,
         )
+        t_cache = time.perf_counter()
+        if write_cache:
+            save_segment_cache(
+                node_id,
+                seg,
+                plan,
+                chunk,
+                av_latent=samples,
+                handoff=handoff,
+                audio=audio_dict if isinstance(audio_dict, dict) else None,
+            )
+        cache_s = time.perf_counter() - t_cache
         completed_outputs[seg.index] = chunk
         completed_pre_refine[seg.index] = pre_chunk
         completed_refine_passes[seg.index] = pass_clips
@@ -1291,7 +1363,11 @@ def execute_director_plan_core(
             )
         mem.checkpoint("After MP4 Export")
 
-        if seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"} and chunk.shape[0] >= 1:
+        if (
+            live_tae_preview
+            and seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"}
+            and chunk.shape[0] >= 1
+        ):
             try:
                 frames_b64 = [
                     tensor_frame_to_jpeg_b64(chunk[i])
@@ -1310,7 +1386,7 @@ def execute_director_plan_core(
             except Exception as exc:
                 log.debug("Segment video preview skipped: %s", exc)
 
-        if clear_vram_between_segments:
+        if clear_vram_between_segments and progress_index < seg_total - 1:
             segment_vram_cleanup(
                 strategy=mem.memory_strategy,
                 enabled=True,
@@ -1322,6 +1398,12 @@ def execute_director_plan_core(
             f"({target_len} frames, seed={seed}"
             f"{', ' + refine_note if refine_note else ''})"
         )
+        reports.append(
+            f"Segment {ui_idx + 1} timing: "
+            f"cond={cond_s:.1f}s sample={sample_s:.1f}s decode={decode_s:.1f}s "
+            f"cache={'skipped' if not write_cache else f'{cache_s:.1f}s'} "
+            f"cleanup={'skipped' if progress_index >= seg_total - 1 else 'between-seg'}"
+        )
         log.info(
             "MiniMax H3 Director segment %d/%d done (%d frames, task=%s)",
             ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
@@ -1331,12 +1413,6 @@ def execute_director_plan_core(
 
     for seg in all_segments:
         if seg.index in run_indices:
-            if clear_vram_between_segments and segment_outputs:
-                segment_vram_cleanup(
-                    strategy=mem.memory_strategy,
-                    enabled=True,
-                    unload_models=True,
-                )
             chunk, audio_dict, pre_chunk = _run_one_segment(
                 seg, progress_index=progress_pos[seg.index]
             )
