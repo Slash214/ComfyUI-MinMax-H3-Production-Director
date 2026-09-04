@@ -9,6 +9,16 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 
 ## Features
 
+This fork includes upstream through `6b58541` (2026-09-04), while retaining its
+`balanced_20gb` policy, targeted text-encoder release, deferred VAE decode and diagnostics.
+The Performance section adds **Low-memory segment export** (`low_memory_segment_export`),
+off by default. In segments mode, with first-pass confirmation off, older IMAGE and
+pre-refine batches become one-frame posters only after successful final/pre MP4 writes
+and continuity processing. Failed writes or trim rewrites retain the full batches.
+The last segment remains full. Keep this option off for downstream full-frame processing.
+Audio, frame counts and source-image lengths use the actual export lengths.
+Segments mode skips the unused full-timeline concatenation even when this option is off.
+
 **MiniMaxH3Director** is a single-node director for long-form, multi-segment MiniMax H3 audio–video generation — timeline planning, conditioning, sampling, AV decode, and export in one place. It wraps the official `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` + `MiniMaxH3SigmaShift` + `KSampler` pipeline with native stereo audio.
 
 ### Core capabilities
@@ -26,6 +36,7 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 | **Segment continuity** | Off by default. For multi-segment `t2v` / `i2v` / `fl2v` / `r2v` / `v2v` / `rv2v`, pin the previous generated tail (motion + generated audio) into the next sample, then trim the prefix. Context frames: 5 / 22 / 39 / 56 — **recommended default: 22**. **Thanks to [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) for the implementation approach** |
 | **Refine / upscale** | Wire **MiniMax H3 Director Refine** into Director `refine`. Unconnected = original single-pass sampling. `refine` = same-resolution second sample; `upscale` = enlarge to a target canvas then SIGMAS sample (pixel / RTX VSR / H3 latent); `latent_upscale` = H3 latent enlarge only, no second sample. `passes` repeats refine (upscale once). Optional `refine_model` swaps the second-pass UNET. `confirm_first_pass` runs the first pass only, then refines on a second Queue with the same seed. `images` is the refined clip; `images_pre_refine` is the first pass (before upscale) |
 | **Run report** | `report` output with plan and per-segment summary |
+| **Director pack I/O** | Toolbar **Import pack / Export pack**: zip of timeline JSON plus reference images/videos/audio. ASCII folders (`shared_params/`, `asset_groups/01/`, `Picture1`…) match the English UI and avoid path-encoding issues |
 
 Reference-audio slots can select an existing video or a local audio/video file. A video's first audio stream is extracted immediately to FLAC directly under `input/`; local source videos remain temporary and are not saved as video assets. Audio follows ComfyUI's existing upload rule: identical content with the same name is reused, while different content with the same name gets a numeric suffix without overwriting; the same resolved audio path is not added twice within one material group.
 
@@ -40,6 +51,34 @@ Reference-audio slots can select an existing video or a local audio/video file. 
 > Use **fl2va** UNET for `t2v` / `i2v` / `fl2v`; **ref2va** for `r2v` / `v2v` / `rv2v`.
 
 `Export source to source_images` populates only the separate `source_images` output; it does not change `images`. Connect `source_images` to a preview or video compositor. Decode failures are reported explicitly and emit a neutral placeholder instead of generated frames.
+
+## Director pack (script + media)
+
+Toolbar **Import pack / Export pack** writes `*.mmxpack.zip`. Paths are ASCII only and match the English UI (independent of the current UI language).
+
+| English UI | Pack path |
+|------|------|
+| Shared params | `shared_params/` |
+| Asset group 1 | `asset_groups/01/` |
+| Picture 1–9 | `Picture1.png` … `Picture9.webp` |
+| Video 1–3 | `Video1.mp4` |
+| Audio 1–3 | `Audio1.wav` |
+| start / end (fl2v) | `start.jpg` / `end.jpg` in that group folder |
+| Upload video (v2v source) | `source_video/` |
+
+```
+pack.json
+shared_params/shared_params.json
+shared_params/Picture1.png
+asset_groups/01/group.json
+asset_groups/01/Picture4.png
+timeline.json
+```
+
+- `timeline.json` is written on Director export for lossless round-trip (including other-task drafts).
+- A converter may write only `pack.json` + `shared_params/` + `asset_groups/` and omit `timeline.json`.
+- Slot numbers match the UI: if Shared params occupy Picture 1–3, group folders continue from `Picture4` — do not rename the group’s first image to `Picture1`.
+- Models (UNET / CLIP / VAE) are not included. Import replaces the current node timeline (with confirmation). Media is copied to ComfyUI `input/minimax_director_packs/`.
 
 ## Requirements
 

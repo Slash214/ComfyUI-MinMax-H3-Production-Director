@@ -35,6 +35,7 @@ import {
     RESOLUTION_ASPECTS,
     resolutionFromSelector,
     resolveTaskKey,
+    resolveSegmentTaskKey,
     resolveSegmentRefImageSize,
     normalizeRefImageSize,
     snapResolutionDim,
@@ -111,6 +112,7 @@ import {
     taskDisplayLabel,
     toggleLocale,
 } from "./minimax_i18n.js";
+import { bindPackActions } from "./minimax_pack.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
@@ -177,7 +179,7 @@ function normalizeAudioMode(value) {
 const CONTINUITY_FRAME_CHOICES = [5, 22, 39, 56];
 /** Official Motion Context baseline recommendation. */
 const DEFAULT_CONTINUITY_FRAMES = 22;
-const CONTINUITY_TASKS = new Set(["t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"]);
+const CONTINUITY_TASKS = new Set(["t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v", "mixed"]);
 
 function isVideoEditTaskKey(taskKey) {
     return taskKey === "v2v" || taskKey === "rv2v";
@@ -275,6 +277,22 @@ function sanitizeSegmentForPayload(seg) {
         refVideos: Array.isArray(rest.refVideos) ? rest.refVideos.map(sanitizeRefVideo) : [],
         genImage: rest.genImage
             ? { imageFile: rest.genImage.imageFile || "", fileName: rest.genImage.fileName || "" }
+            : undefined,
+        startImage: rest.startImage
+            ? {
+                imageFile: rest.startImage.imageFile || "",
+                fileName: rest.startImage.fileName || "",
+                width: rest.startImage.width || 0,
+                height: rest.startImage.height || 0,
+            }
+            : undefined,
+        endImage: rest.endImage
+            ? {
+                imageFile: rest.endImage.imageFile || "",
+                fileName: rest.endImage.fileName || "",
+                width: rest.endImage.width || 0,
+                height: rest.endImage.height || 0,
+            }
             : undefined,
         referenceVideo: rest.referenceVideo
             ? {
@@ -431,6 +449,7 @@ const HIDDEN_WIDGETS = [
 const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
     clear_vram_between_segments: "widget.clearVram",
+    low_memory_segment_export: "widget.lowMemorySegmentExport",
     export_source_images: "widget.exportSourceImages",
     control_after_generate: "widget.controlAfterGenerate",
     "control after generate": "widget.controlAfterGenerate",
@@ -438,6 +457,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
 
 const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     clear_vram_between_segments: "widget.tooltip.clearVram",
+    low_memory_segment_export: "widget.tooltip.lowMemorySegmentExport",
     export_source_images: "widget.tooltip.exportSourceImages",
 };
 
@@ -855,6 +875,7 @@ const STYLES = `
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-fl2v,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v){
   /* Header stays compact; leftover height goes to the prompt row (not a blank gap). */
   grid-template-rows:auto minmax(0,1fr);
@@ -862,9 +883,11 @@ const STYLES = `
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-head,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-head,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-fl2v .bd-batch-head,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-head{align-self:start}
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain .bd-batch-prompts,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-source .bd-batch-prompts,
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-fl2v .bd-batch-prompts,
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-prompts{
   height:100%;min-height:0;max-height:100%;overflow:hidden;align-self:stretch
 }
@@ -910,6 +933,18 @@ const STYLES = `
 .bd-media-preview img,.bd-media-preview video{display:block;width:100%;height:100%;object-fit:contain;background:#000}
 .bd-media-preview-empty{padding:18px;color:#666;font-size:11px;line-height:1.45;text-align:center}
 .bd-media-meta{display:flex;flex-direction:column;gap:4px;color:#9a9a9a;font-size:10px;line-height:1.45;word-break:break-all}
+.bd-media-view-toggle{display:inline-flex;gap:4px}
+.bd-media-view-toggle .bd-btn.active{border-color:#4fff8f;color:#4fff8f}
+.bd-media-gallery{display:none;grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-rows:max-content;align-content:start;align-items:start;gap:8px;width:100%;height:min(48vh,320px);min-height:180px;flex:0 1 auto;overflow-y:scroll;overflow-x:hidden;padding:8px;box-sizing:border-box;background:#141414;border:1px solid #333;border-radius:6px;scrollbar-width:auto;scrollbar-color:#687783 #151515}
+.bd-media-gallery .bd-media-empty-row{grid-column:1/-1}
+.bd-media-left.is-thumbs .bd-media-table{display:none}
+.bd-media-left.is-thumbs .bd-media-gallery{display:grid}
+.bd-media-card{appearance:none;position:relative;min-width:0;padding:4px;background:#161616;border:1px solid #333;border-radius:6px;color:#ddd;cursor:pointer;text-align:left;font:inherit;overflow:hidden}
+.bd-media-card:hover,.bd-media-card.selected{border-color:#4fff8f;background:#202820}
+.bd-media-card img,.bd-media-card video,.bd-media-card .bd-media-card-audio{display:block;width:100%;height:94px;object-fit:cover;background:#090909;border-radius:4px}
+.bd-media-card-audio{display:flex;align-items:center;justify-content:center;color:#9a9a9a;font-size:28px}
+.bd-media-card-has-video::after{content:"▶";position:absolute;right:8px;bottom:22px;width:18px;height:18px;border-radius:9px;background:rgba(0,0,0,.55);color:#fff;font-size:9px;line-height:18px;text-align:center;pointer-events:none}
+.bd-media-card-name{display:block;padding:5px 2px 1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;line-height:1.35}
 .bd-toolbar-wrap{display:flex;flex-direction:column;gap:4px;width:100%}
 .bd-toolbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;width:100%}
 .bd-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center;flex:1;min-width:0}
@@ -1344,6 +1379,24 @@ function inputViewUrl(relativePath, type = "input") {
     return api.apiURL(`/view?${params.toString()}`);
 }
 
+const MEDIA_PICKER_VIEW_KEY = "minimax.director.mediaPickerView";
+
+function readMediaPickerView() {
+    try {
+        return localStorage.getItem(MEDIA_PICKER_VIEW_KEY) === "thumbs" ? "thumbs" : "list";
+    } catch {
+        return "list";
+    }
+}
+
+function writeMediaPickerView(view) {
+    try {
+        localStorage.setItem(MEDIA_PICKER_VIEW_KEY, view === "thumbs" ? "thumbs" : "list");
+    } catch {
+        /* private mode / quota */
+    }
+}
+
 function refViewUrl(imageFile) {
     return inputViewUrl(imageFile, "input");
 }
@@ -1533,7 +1586,7 @@ function moveDirectorDomWidgetToEnd(node) {
     node.widgets.push(widget);
 }
 
-const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments"];
+const PERF_WIDGET_ORDER = ["bd_grp_perf", "clear_vram_between_segments", "low_memory_segment_export"];
 
 function moveDirectorPerfWidgetsBeforeTimeline(node) {
     const dom = node?._minimaxDomWidget;
@@ -2491,6 +2544,8 @@ class MiniMaxH3DirectorEditor {
                         refAudios: clean.refAudios || [],
                         refVideos: clean.refVideos || [],
                         genImage: clean.genImage || { imageFile: "" },
+                        startImage: clean.startImage || null,
+                        endImage: clean.endImage || null,
                         // Persist per-segment「引用上段」(default true when unset).
                         continuityFromPrev: isSegmentContinuityFromPrev(clean, i),
                         refImageSize: resolveSegmentRefImageSize(clean, this.timeline.output),
@@ -2664,6 +2719,8 @@ class MiniMaxH3DirectorEditor {
                         <button type="button" class="bd-btn bd-btn-zoom" data-a="zoom-toggle" data-i18n="toolbar.timelineZoom" data-i18n-title="toolbar.timelineZoomTitle">放大</button>
                         <input type="range" class="bd-tl-zoom-slider hidden" data-r="zoom" min="1" max="10" step="any" value="1" data-i18n-title="tooltip.timelineZoom">
                     </div>
+                    <button type="button" class="bd-btn" data-a="pack-import" data-i18n="toolbar.importPack" data-i18n-title="tooltip.importPack">导入导演包</button>
+                    <button type="button" class="bd-btn" data-a="pack-export" data-i18n="toolbar.exportPack" data-i18n-title="tooltip.exportPack">导出导演包</button>
                     <button type="button" class="bd-btn" data-a="lang-toggle" data-i18n="toolbar.langToggle" data-i18n-title="toolbar.langToggleTitle">EN</button>
                     <div class="bd-bounds" data-r="bounds">起点: 0.00 | 终点: -</div>
                     <div class="bd-timecode" data-r="timecode">0.00s</div>
@@ -3153,6 +3210,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
         bind('[data-a="lang-toggle"]', () => toggleLocale());
         bind('[data-a="zoom-toggle"]', () => this.toggleTimelineZoom());
+        bindPackActions(this);
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
         bind('[data-a="live-tae-preview"]', () => this.toggleLiveTaePreview());
@@ -3601,6 +3659,64 @@ class MiniMaxH3DirectorEditor {
     }
 
     widget(name) { return this.node.widgets?.find((w) => w.name === name); }
+
+    applyImportedTimeline(timeline, widgets = {}) {
+        const data = timeline && typeof timeline === "object" ? timeline : {};
+        // Replace, do not merge: drop in-memory drafts from the previous task so
+        // later t2v/r2v/v2v switches restore pack batchWorkspaces, not stale slots.
+        this._batchWsMem = {};
+        this._videoWsMem = {};
+        this._lastOutputWasBatchFixed = false;
+        this._legacyFrames = [];
+        this._clearPreviewVideos?.(true);
+        const taskType = widgets.task_type || widgets.taskType || data.global?.taskType || "";
+        if (this.taskTypeWidget && taskType) this.taskTypeWidget.value = taskType;
+        if (this.globalTask && taskType) this.globalTask.value = taskType;
+        for (const name of ["steps", "sampler", "scheduler", "cfg", "shift_video", "shift_audio", "seed"]) {
+            if (widgets[name] == null || widgets[name] === "") continue;
+            const w = this.widget(name);
+            if (w) w.value = widgets[name];
+        }
+        const out = data.output && typeof data.output === "object" ? data.output : {};
+        if (this.widthWidget && out.width) this.widthWidget.value = out.width;
+        if (this.heightWidget && out.height) this.heightWidget.value = out.height;
+        if (this.frameRateWidget && (data.frameRate || out.frameRate)) {
+            this.frameRateWidget.value = data.frameRate || out.frameRate;
+        }
+        if (this.refMaxWidget && (data.refMaxSize || out.longEdge)) {
+            this.refMaxWidget.value = data.refMaxSize || out.longEdge;
+        }
+        if (this.globalPromptWidget && data.global?.prompt != null) {
+            this.globalPromptWidget.value = data.global.prompt;
+        }
+        if (this.timelineWidget) this.timelineWidget.value = JSON.stringify(data);
+        const initTotal = Math.max(0, parseInt(this.totalFramesWidget?.value || data.totalFrames || 124, 10));
+        const initFps = coerceTimelineFps(this.frameRateWidget?.value || data.frameRate || 24);
+        this.timeline = parseTimeline(this.timelineWidget?.value, initTotal, initFps);
+        this.syncFrameRateUI?.(this.timeline.frameRate);
+        this._directorMode = this.getDirectorMode();
+        this._taskKey = resolveTaskKey(this.taskTypeWidget?.value || taskType);
+        if (this._directorMode === "video") {
+            this.restoreVideoFromTimeline();
+        } else if (this._directorMode === "prompt_batch" || this._directorMode === "image_batch") {
+            ensureImageBatchTimeline(this);
+        } else if (this._directorMode === "fl2v") {
+            ensureFl2vTimeline(this);
+        } else {
+            this.ensureGenTimeline();
+        }
+        this.applyTaskLayout(this._directorMode);
+        this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value);
+        this.setEditMode(this.timeline.editMode || "global");
+        this.selectedIndex = 0;
+        this.updateSelectionUI();
+        this.commit(true, { syncTimeline: true });
+        snapshotDirectorSampleWidgets(this.node, { force: true, includeHidden: true });
+        this._externalGroupsSyncSig = null;
+        this.syncExternalGroupsTimeline?.();
+        this.scheduleSettleRender?.();
+        this.updateDomWidgetHeight?.();
+    }
 
     _videoIdentityFromParts(video, clips) {
         const list = Array.isArray(clips) && clips.length ? clips : [];
@@ -4240,7 +4356,10 @@ class MiniMaxH3DirectorEditor {
 
     _resetBatchWorkspaceLive(taskKey) {
         const key = resolveTaskKey(taskKey || this.getTaskKey());
-        this.timeline.segments = [newBatchSegment({ durationSec: defaultDurationSec(key) })];
+        this.timeline.segments = [newBatchSegment({
+            durationSec: defaultDurationSec(key === "mixed" ? "t2v" : key),
+            ...(key === "mixed" ? { taskType: "t2v" } : {}),
+        })];
         this.timeline.editMode = "segment";
         this.selectedIndex = 0;
         this._clearLiveRunSelection();
@@ -4744,7 +4863,7 @@ class MiniMaxH3DirectorEditor {
             this.outHint.classList.toggle("hidden", !showHint);
             this.outHint.textContent = showHint ? genLayoutHint(this.getTaskKey()) : "";
         }
-        const isVideoEditTask = isVideoEditTaskKey(taskKey);
+        const isVideoEditTask = isVideoEditTaskKey(taskKey) || taskKey === "r2v";
         this.outAudioWrap?.classList.toggle("hidden", !isVideoEditTask);
         this.syncExportSourceImagesUI();
         if (this.outExportMode) {
@@ -7156,6 +7275,10 @@ class MiniMaxH3DirectorEditor {
             window.removeEventListener("keydown", this._modalKeyHandler, true);
             this._modalKeyHandler = null;
         }
+        if (this._mediaThumbObserver) {
+            this._mediaThumbObserver.disconnect();
+            this._mediaThumbObserver = null;
+        }
         if (this._modalEl) {
             this._modalEl.remove();
             this._modalEl = null;
@@ -7337,6 +7460,7 @@ class MiniMaxH3DirectorEditor {
                             </div>
                             <div class="bd-media-tbody"></div>
                         </div>
+                        <div class="bd-media-gallery" tabindex="0"></div>
                     </div>
                     <div class="bd-media-right">
                         <div class="bd-media-preview">
@@ -7351,6 +7475,8 @@ class MiniMaxH3DirectorEditor {
             const actionsTop = panel.querySelector(".bd-media-head-actions");
             const tableEl = panel.querySelector(".bd-media-table");
             const tbodyEl = panel.querySelector(".bd-media-tbody");
+            const leftEl = panel.querySelector(".bd-media-left");
+            const galleryEl = panel.querySelector(".bd-media-gallery");
             const previewEl = panel.querySelector(".bd-media-preview");
             const previewEmptyEl = panel.querySelector(".bd-media-preview-empty");
             const metaEl = panel.querySelector(".bd-media-meta");
@@ -7373,6 +7499,9 @@ class MiniMaxH3DirectorEditor {
             let listedItems = [];
             let sortKey = "time";
             let sortDir = "desc";
+            let view = readMediaPickerView();
+            let listBtn;
+            let thumbsBtn;
 
             const finish = (val) => {
                 this._closeBdModal();
@@ -7485,14 +7614,145 @@ class MiniMaxH3DirectorEditor {
                 metaEl.appendChild(pathEl);
             };
 
-            const selectRow = (relPath, { scroll = false } = {}) => {
-                selectedValue = relPath || "";
+            const thumbKind = (item) => (kind === "reference_audio" ? item.mediaKind : kind);
+            const VIDEO_THUMB_MAX = 3;
+            const videoThumbQueue = [];
+            let videoThumbInflight = 0;
+
+            const paintVideoPoster = (video) => {
+                if (!video.isConnected || video.videoWidth <= 0) return false;
+                try {
+                    const canvas = document.createElement("canvas");
+                    const w = 192;
+                    const h = Math.max(1, Math.round((w * video.videoHeight) / video.videoWidth));
+                    canvas.width = w;
+                    canvas.height = h;
+                    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+                    const img = document.createElement("img");
+                    img.style.cssText = video.style.cssText;
+                    img.alt = "";
+                    img.src = canvas.toDataURL("image/jpeg", 0.72);
+                    video.replaceWith(img);
+                    return true;
+                } catch {
+                    return false;
+                }
+            };
+
+            const loadOneVideoThumb = (video) => new Promise((resolve) => {
+                let settled = false;
+                const finishThumb = () => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    video.removeAttribute("src");
+                    try { video.load(); } catch { /* ignore */ }
+                    resolve();
+                };
+                const timer = setTimeout(finishThumb, 8000);
+                if (!video.isConnected) {
+                    finishThumb();
+                    return;
+                }
+                const src = video.dataset.src;
+                if (!src) {
+                    finishThumb();
+                    return;
+                }
+                const onSeeked = () => {
+                    paintVideoPoster(video);
+                    finishThumb();
+                };
+                const onMeta = () => {
+                    try {
+                        const dur = Number(video.duration);
+                        const t = Number.isFinite(dur) && dur > 0
+                            ? Math.min(0.25, dur * 0.08)
+                            : 0.05;
+                        if (video.readyState >= 2 && Math.abs((video.currentTime || 0) - t) < 0.01) {
+                            onSeeked();
+                            return;
+                        }
+                        video.currentTime = t;
+                    } catch {
+                        onSeeked();
+                    }
+                };
+                video.addEventListener("seeked", onSeeked, { once: true });
+                video.addEventListener("loadedmetadata", onMeta, { once: true });
+                video.addEventListener("error", finishThumb, { once: true });
+                video.preload = "metadata";
+                video.muted = true;
+                video.src = src;
+            });
+
+            const pumpVideoThumbs = () => {
+                while (videoThumbInflight < VIDEO_THUMB_MAX && videoThumbQueue.length) {
+                    const video = videoThumbQueue.shift();
+                    if (!video?.isConnected || video.dataset.armed !== "1") continue;
+                    videoThumbInflight += 1;
+                    void loadOneVideoThumb(video).finally(() => {
+                        videoThumbInflight -= 1;
+                        pumpVideoThumbs();
+                    });
+                }
+            };
+
+            const armVideoThumb = (video) => {
+                if (video.dataset.armed === "1") return;
+                video.dataset.armed = "1";
+                videoThumbQueue.push(video);
+                pumpVideoThumbs();
+            };
+
+            const ensureThumbObserver = () => {
+                if (this._mediaThumbObserver) this._mediaThumbObserver.disconnect();
+                this._mediaThumbObserver = new IntersectionObserver((entries) => {
+                    for (const entry of entries) {
+                        const el = entry.target;
+                        const src = el.dataset.src;
+                        if (!src) continue;
+                        if (entry.isIntersecting) {
+                            if (el.tagName === "VIDEO") armVideoThumb(el);
+                            else if (el.getAttribute("src") !== src) el.src = src;
+                        } else if (el.tagName === "VIDEO") {
+                            el.dataset.armed = "0";
+                            el.removeAttribute("src");
+                            try { el.load(); } catch { /* ignore */ }
+                        }
+                    }
+                }, { root: galleryEl, rootMargin: "80px", threshold: 0.01 });
+            };
+
+            const galleryColumns = () => {
+                const cards = [...galleryEl.querySelectorAll(".bd-media-card")];
+                if (cards.length < 2) return 1;
+                const top = cards[0].offsetTop;
+                let n = 1;
+                for (let i = 1; i < cards.length; i++) {
+                    if (cards[i].offsetTop !== top) break;
+                    n += 1;
+                }
+                return Math.max(1, n);
+            };
+
+            const highlightSelection = ({ scroll = false } = {}) => {
                 tbodyEl.querySelectorAll(".bd-media-tr").forEach((row) => {
                     const on = row.dataset.path === selectedValue;
                     row.classList.toggle("selected", on);
-                    if (on && scroll) row.scrollIntoView({ block: "nearest" });
+                    if (on && scroll && view === "list") row.scrollIntoView({ block: "nearest" });
+                });
+                galleryEl.querySelectorAll(".bd-media-card").forEach((card) => {
+                    const on = card.dataset.path === selectedValue;
+                    card.classList.toggle("selected", on);
+                    if (on && scroll && view === "thumbs") card.scrollIntoView({ block: "nearest" });
                 });
                 renderPreview(itemsByPath.get(selectedValue));
+            };
+
+            const selectRow = (relPath, { scroll = false } = {}) => {
+                selectedValue = relPath || "";
+                highlightSelection({ scroll });
             };
 
             const renderRows = () => {
@@ -7504,8 +7764,8 @@ class MiniMaxH3DirectorEditor {
                     empty.textContent = t("mediaPicker.empty");
                     tbodyEl.appendChild(empty);
                     selectedValue = "";
-                    renderPreview(null);
                     syncHeaderState();
+                    highlightSelection();
                     return;
                 }
                 if (!selectedValue || !itemsByPath.has(selectedValue)) {
@@ -7515,7 +7775,6 @@ class MiniMaxH3DirectorEditor {
                     const row = document.createElement("div");
                     row.className = "bd-media-tr";
                     row.dataset.path = item.relPath;
-                    if (item.relPath === selectedValue) row.classList.add("selected");
                     const nameTd = document.createElement("div");
                     nameTd.className = "bd-media-td bd-media-td-name";
                     const mediaPrefix = kind === "reference_audio"
@@ -7542,9 +7801,91 @@ class MiniMaxH3DirectorEditor {
                     tbodyEl.appendChild(row);
                 }
                 syncHeaderState();
-                renderPreview(itemsByPath.get(selectedValue));
-                const selectedRow = tbodyEl.querySelector(".bd-media-tr.selected");
-                selectedRow?.scrollIntoView({ block: "nearest" });
+                highlightSelection({ scroll: true });
+            };
+
+            const renderGallery = () => {
+                if (this._mediaThumbObserver) this._mediaThumbObserver.disconnect();
+                galleryEl.innerHTML = "";
+                const rows = sortedItems();
+                if (!rows.length) {
+                    const empty = document.createElement("div");
+                    empty.className = "bd-media-empty-row";
+                    empty.textContent = t("mediaPicker.empty");
+                    galleryEl.appendChild(empty);
+                    selectedValue = "";
+                    highlightSelection();
+                    return;
+                }
+                if (!selectedValue || !itemsByPath.has(selectedValue)) {
+                    selectedValue = rows[0].relPath || "";
+                }
+                ensureThumbObserver();
+                for (const item of rows) {
+                    const card = document.createElement("button");
+                    card.type = "button";
+                    card.className = "bd-media-card";
+                    card.dataset.path = item.relPath;
+                    const previewKind = thumbKind(item);
+                    const src = inputViewUrl(item.relPath, item.type || "input");
+                    const thumbCss = "display:block;width:100%;height:94px;object-fit:cover;background:#090909;border-radius:4px";
+                    if (previewKind === "audio") {
+                        const ph = document.createElement("div");
+                        ph.className = "bd-media-card-audio";
+                        ph.style.cssText = thumbCss;
+                        ph.textContent = "♪";
+                        card.appendChild(ph);
+                    } else if (previewKind === "video") {
+                        card.classList.add("bd-media-card-has-video");
+                        const video = document.createElement("video");
+                        video.style.cssText = thumbCss;
+                        video.muted = true;
+                        video.playsInline = true;
+                        video.preload = "none";
+                        video.dataset.src = src;
+                        card.appendChild(video);
+                        this._mediaThumbObserver.observe(video);
+                    } else {
+                        const img = document.createElement("img");
+                        img.style.cssText = thumbCss;
+                        img.alt = "";
+                        img.dataset.src = src;
+                        card.appendChild(img);
+                        this._mediaThumbObserver.observe(img);
+                    }
+                    const name = document.createElement("span");
+                    name.className = "bd-media-card-name";
+                    name.textContent = item.relPath || item.fileName || item.name || "";
+                    name.title = name.textContent;
+                    card.appendChild(name);
+                    card.addEventListener("click", () => selectRow(item.relPath));
+                    card.addEventListener("dblclick", () => {
+                        const choice = selectedChoice();
+                        if (choice) finish(choice);
+                    });
+                    galleryEl.appendChild(card);
+                }
+                highlightSelection({ scroll: true });
+            };
+
+            const applyViewClass = () => {
+                leftEl.classList.toggle("is-thumbs", view === "thumbs");
+                listBtn?.classList.toggle("active", view === "list");
+                thumbsBtn?.classList.toggle("active", view === "thumbs");
+            };
+
+            const renderBrowser = () => {
+                applyViewClass();
+                if (view === "thumbs") {
+                    renderGallery();
+                } else {
+                    if (this._mediaThumbObserver) {
+                        this._mediaThumbObserver.disconnect();
+                        this._mediaThumbObserver = null;
+                    }
+                    galleryEl.innerHTML = "";
+                    renderRows();
+                }
             };
 
             const moveSelection = (delta) => {
@@ -7558,11 +7899,12 @@ class MiniMaxH3DirectorEditor {
             const loadItems = async () => {
                 statusEl.textContent = t("mediaPicker.loading");
                 tbodyEl.innerHTML = "";
+                galleryEl.innerHTML = "";
                 renderPreview(null);
                 try {
                     listedItems = await this.listInputMedia(kind);
                     itemsByPath = new Map(listedItems.map((item) => [item.relPath, item]));
-                    renderRows();
+                    renderBrowser();
                     statusEl.textContent = listedItems.length
                         ? t("mediaPicker.count", { n: listedItems.length })
                         : t("mediaPicker.empty");
@@ -7570,6 +7912,7 @@ class MiniMaxH3DirectorEditor {
                     listedItems = [];
                     itemsByPath = new Map();
                     tbodyEl.innerHTML = "";
+                    galleryEl.innerHTML = "";
                     statusEl.textContent = err?.message || String(err);
                 }
             };
@@ -7583,9 +7926,31 @@ class MiniMaxH3DirectorEditor {
                         sortKey = key;
                         sortDir = key === "name" ? "asc" : "desc";
                     }
-                    renderRows();
+                    renderBrowser();
                 });
             });
+
+            const viewToggle = document.createElement("div");
+            viewToggle.className = "bd-media-view-toggle";
+            listBtn = document.createElement("button");
+            listBtn.type = "button";
+            listBtn.className = "bd-btn";
+            listBtn.textContent = t("mediaPicker.viewList");
+            thumbsBtn = document.createElement("button");
+            thumbsBtn.type = "button";
+            thumbsBtn.className = "bd-btn";
+            thumbsBtn.textContent = t("mediaPicker.viewThumbs");
+            const setView = (next) => {
+                view = next === "thumbs" ? "thumbs" : "list";
+                writeMediaPickerView(view);
+                renderBrowser();
+                if (view === "thumbs") galleryEl.focus();
+                else tableEl.focus();
+            };
+            listBtn.onclick = () => setView("list");
+            thumbsBtn.onclick = () => setView("thumbs");
+            viewToggle.append(listBtn, thumbsBtn);
+            actionsTop.appendChild(viewToggle);
 
             const refreshBtn = document.createElement("button");
             refreshBtn.type = "button";
@@ -7636,10 +8001,16 @@ class MiniMaxH3DirectorEditor {
                     finish(null);
                     return;
                 }
-                if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "ArrowLeft" || e.key === "ArrowRight") {
                     if (!panel.contains(e.target) && e.target !== document.body) return;
+                    if (view === "list" && (e.key === "ArrowLeft" || e.key === "ArrowRight")) return;
                     e.preventDefault();
-                    moveSelection(e.key === "ArrowDown" ? 1 : -1);
+                    const cols = view === "thumbs" ? galleryColumns() : 1;
+                    const delta = e.key === "ArrowDown" ? cols
+                        : e.key === "ArrowUp" ? -cols
+                        : e.key === "ArrowRight" ? 1
+                        : -1;
+                    moveSelection(delta);
                     return;
                 }
                 if (e.key !== "Enter") return;
@@ -7652,8 +8023,10 @@ class MiniMaxH3DirectorEditor {
             overlay.appendChild(panel);
             this.root.appendChild(overlay);
             this._modalEl = overlay;
+            applyViewClass();
             void loadItems();
-            tableEl.focus();
+            if (view === "thumbs") galleryEl.focus();
+            else tableEl.focus();
         });
     }
 
@@ -9697,7 +10070,9 @@ class MiniMaxH3DirectorEditor {
             if (pxW < 8 || seg.length <= 0) continue;
             const a = seg.start + 1;
             const b = seg.start + seg.length;
-            const rangeText = `${a}-${b}`;
+            const rangeText = this.getTaskKey() === "mixed"
+                ? `${resolveSegmentTaskKey(seg, "mixed")} ${a}-${b}`
+                : `${a}-${b}`;
             // v2v / r2v / fl2v: emphasize selected segment label (matches card selection).
             const showSegSel = this.usesBatchTimeline() || this.isFl2vMode()
                 || !(this.isImageBatch() || this.isGenMode());
@@ -10850,7 +11225,8 @@ class MiniMaxH3DirectorEditor {
 
     onGlobalField(field, value) {
         this.timeline.global = this.timeline.global || { refs: [] };
-        if (field === "taskType") {
+        const taskTypeChanged = field === "taskType";
+        if (taskTypeChanged) {
             const prevTaskKey = this._taskKey || resolveTaskKey(this.timeline.global?.taskType || "");
             this.timeline.global[field] = value;
             const prevMode = this._directorMode || "video";
@@ -10866,6 +11242,11 @@ class MiniMaxH3DirectorEditor {
         }
         if (field === "prompt" && this.globalPromptWidget) this.globalPromptWidget.value = value;
         this.scheduleTimelineSync();
+        if (taskTypeChanged) {
+            // Task selector is a custom DOM control; assigning the hidden
+            // task_type widget does not fire LiteGraph onWidgetChanged.
+            this.node?._mmxRefreshFirstPassCache?.(0);
+        }
         if (field === "prompt") this._schedulePromptRender();
         else this.scheduleRender();
     }

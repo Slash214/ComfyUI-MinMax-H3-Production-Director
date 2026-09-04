@@ -231,6 +231,7 @@ class MiniMaxH3Director:
         export_source_images=False,
         memory_strategy="standard",
         memory_debug=False,
+        low_memory_segment_export=False,
         **kwargs,
     ):
         del kwargs
@@ -250,37 +251,47 @@ class MiniMaxH3Director:
             refine=refine,
         )
 
-        combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
-            execute_director_plan_core(
-                plan,
-                node_id=unique_id,
-                model=model,
-                vae=video_vae,
-                audio_vae=audio_vae,
-                clip=clip,
-                cfg=cfg,
-                seed=seed,
-                steps=steps,
-                sampler=sampler,
-                scheduler=scheduler,
-                sigmas=sigmas,
-                shift_video=shift_video,
-                shift_audio=shift_audio,
-                clear_vram_between_segments=clear_vram_between_segments,
-                memory_strategy=memory_strategy,
-                memory_debug=memory_debug,
+        try:
+            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
+                execute_director_plan_core(
+                    plan,
+                    node_id=unique_id,
+                    model=model,
+                    vae=video_vae,
+                    audio_vae=audio_vae,
+                    clip=clip,
+                    cfg=cfg,
+                    seed=seed,
+                    steps=steps,
+                    sampler=sampler,
+                    scheduler=scheduler,
+                    sigmas=sigmas,
+                    shift_video=shift_video,
+                    shift_audio=shift_audio,
+                    clear_vram_between_segments=clear_vram_between_segments,
+                    memory_strategy=memory_strategy,
+                    memory_debug=memory_debug,
+                    low_memory_segment_export=low_memory_segment_export,
+                )
             )
-        )
 
-        return finalize_director_outputs(
-            plan,
-            combined,
-            segment_outputs,
-            report,
-            export_source_images=export_source_images,
-            segment_audios=segment_audios,
-            segment_frame_counts=export_frame_counts,
-            pre_refine_combined=pre_combined,
-            pre_refine_segments=pre_segments,
-            block_final_images=held_for_confirmation,
-        )
+            return finalize_director_outputs(
+                plan,
+                combined,
+                segment_outputs,
+                report,
+                export_source_images=export_source_images,
+                segment_audios=segment_audios,
+                segment_frame_counts=export_frame_counts,
+                pre_refine_combined=pre_combined,
+                pre_refine_segments=pre_segments,
+                block_final_images=held_for_confirmation,
+            )
+        finally:
+            # Full source/reference PCM is execution-scoped.
+            cache = getattr(plan, "audio_decode_cache", None)
+            if isinstance(cache, dict):
+                cache.clear()
+            for item in getattr(plan, "global_ref_audios", None) or []:
+                if getattr(item, "audio_path", ""):
+                    item.audio = None

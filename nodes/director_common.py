@@ -118,6 +118,17 @@ def director_perf_inputs() -> dict:
                 ),
             },
         ),
+        "low_memory_segment_export": (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": (
+                    "低内存分段导出：仅在分段导出模式生效。视频成功落盘且完成段间衔接后，"
+                    "将旧段 images / images_pre_refine 替换为单帧封面；完整视频在 MP4 文件中。"
+                    "下游需要完整帧时保持关闭。一采确认时自动停用。"
+                ),
+            },
+        ),
     }
 
 
@@ -284,6 +295,7 @@ def build_source_images_output(
     images_out: list[torch.Tensor],
     *,
     split_outputs: bool,
+    segment_frame_counts: list[int] | None = None,
 ) -> list[torch.Tensor]:
     if split_outputs:
         chunks: list[torch.Tensor] = []
@@ -296,8 +308,12 @@ def build_source_images_output(
                 for i in sorted(run_idx)
                 if 0 <= i < len(plan.segments)
             ]
-        for seg, generated in zip(segs, images_out):
-            target_len = int(generated.shape[0])
+        for pos, (seg, generated) in enumerate(zip(segs, images_out)):
+            target_len = (
+                int(segment_frame_counts[pos])
+                if segment_frame_counts is not None and pos < len(segment_frame_counts)
+                else int(generated.shape[0])
+            )
             raw = load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
             fitted = _fit_source_clip_to_plan(plan, raw)
             chunks.append(pad_or_trim_frames(fitted, target_len).cpu().float())
@@ -379,10 +395,13 @@ def finalize_director_outputs(
         is_batch=is_batch,
         video_batch=video_batch,
     )
+    if split_layout and segment_frame_counts:
+        frame_count = int(sum(int(n) for n in segment_frame_counts))
     if export_segments and len(segment_outputs) > 1:
         report = (
             report
-            + f"\n\nExport mode: segments — {len(segment_outputs)} clip(s) on images output."
+            + f"\n\nExport mode: segments — {len(segment_outputs)} clip(s) on images output "
+            "(see the low-memory export report for any released clips)."
         )
     if plan.run_indices is not None and split_layout:
         report = (
@@ -434,7 +453,7 @@ def finalize_director_outputs(
         export_segments=split_for_audio,
         output_frame_end=audio_frame_end,
         segment_audios=segment_audios if use_generated else None,
-        segment_frame_counts=segment_frame_counts if use_generated else None,
+        segment_frame_counts=segment_frame_counts,
         audio_mode=audio_mode,
     )
     report = report + source_audio_report_note(
@@ -454,6 +473,7 @@ def finalize_director_outputs(
                 plan,
                 images_out,
                 split_outputs=split_source_outputs,
+                segment_frame_counts=segment_frame_counts,
             )
             source_frames = sum(int(batch.shape[0]) for batch in source_images_out)
             report = report + (
