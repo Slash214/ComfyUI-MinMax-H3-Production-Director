@@ -32,7 +32,7 @@ def _pixel_exports_complete(run_dir, index, paths, *, require_pre=False) -> bool
 def _poster_frame(tensor: torch.Tensor | None) -> torch.Tensor:
     """1-frame stand-in so IMAGE list length stays valid after a pixel release."""
     if not isinstance(tensor, torch.Tensor) or tensor.ndim != 4 or int(tensor.shape[0]) <= 0:
-        return torch.full((1, 1, 1, 3), 0.5)
+        return torch.full((1, 2, 2, 3), 0.5)
     return tensor[-1:].detach().cpu().contiguous().clone()
 
 

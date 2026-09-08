@@ -9,15 +9,21 @@ Repository: [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/Comf
 
 ## Features
 
-This fork includes upstream through `6b58541` (2026-09-04), while retaining its
+This fork includes upstream through `7de4a95` (2026-09-07), while retaining its
 `balanced_20gb` policy, targeted text-encoder release, deferred VAE decode and diagnostics.
 The Performance section adds **Low-memory segment export** (`low_memory_segment_export`),
 off by default. In segments mode, with first-pass confirmation off, older IMAGE and
-pre-refine batches become one-frame posters only after successful final/pre MP4 writes
-and continuity processing. Failed writes or trim rewrites retain the full batches.
+pre-refine batches are omitted only after successful final/pre MP4 writes
+and continuity processing. Internal posters are not sent to downstream video savers.
+Failed writes or trim rewrites retain the full batches.
 The last segment remains full. Keep this option off for downstream full-frame processing.
-Audio, frame counts and source-image lengths use the actual export lengths.
+Audio and source images follow the retained segment indices; frame_count describes retained IMAGE frames.
 Segments mode skips the unused full-timeline concatenation even when this option is off.
+
+Continuity now offers optional Guide + Redraw (strength 0.40–0.95, default 0.65).
+Guide remains the default. Custom FPS is used consistently to derive aligned segment
+frame counts. Official conditioning nodes are called with keywords for signature compatibility.
+Registry metadata identifies this fork; upstream automatic publishing is disabled on forks.
 
 **MiniMaxH3Director** is a single-node director for long-form, multi-segment MiniMax H3 audio–video generation — timeline planning, conditioning, sampling, AV decode, and export in one place. It wraps the official `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` + `MiniMaxH3SigmaShift` + `KSampler` pipeline with native stereo audio.
 
