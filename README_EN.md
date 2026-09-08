@@ -23,7 +23,7 @@ Segments mode skips the unused full-timeline concatenation even when this option
 Continuity now offers optional Guide + Redraw (strength 0.40–0.95, default 0.65).
 Guide remains the default. Custom FPS is used consistently to derive aligned segment
 frame counts. Official conditioning nodes are called with keywords for signature compatibility.
-Registry metadata identifies this fork; upstream automatic publishing is disabled on forks.
+Registry metadata identifies this fork; upstream automatic publishing is not included in this fork.
 
 **MiniMaxH3Director** is a single-node director for long-form, multi-segment MiniMax H3 audio–video generation — timeline planning, conditioning, sampling, AV decode, and export in one place. It wraps the official `MiniMaxH3ImageToVideo` / `MiniMaxH3ReferenceToVideo` + `MiniMaxH3SigmaShift` + `KSampler` pipeline with native stereo audio.
 
