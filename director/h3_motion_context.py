@@ -576,7 +576,7 @@ def trim_export_tail(
 def generation_frame_budget(visible_frames: int, context_frames: int) -> tuple[int, int]:
     """Return ``(sample_length, trim_frames)`` for Director continuity.
 
-    Director contract: UI segment duration == exported frames.
+    UI duration is the minimum free-region budget before alignment.
 
     Standalone Motion Context sets ``length`` to the sample and delivers
     ``length - context`` (shorter than the UI seconds). That produced the
@@ -584,9 +584,10 @@ def generation_frame_budget(visible_frames: int, context_frames: int) -> tuple[i
 
     1. ``sample = align(visible + context)`` so the pin fits in the head
     2. Trim ``context`` frames after decode
-    3. Keep exactly ``visible`` frames for export
-    4. Next pin uses ``context_end_frame = trim + visible`` (not the sample
-       absolute end, which includes align overshoot beyond the export)
+    3. By default keep ``sample - context`` frames (including alignment tail);
+       with keep-tail disabled, export exactly ``visible`` frames instead
+    4. Next pin uses ``context_end_frame = trim + export_frames``, matching
+       the selected export end
     5. If phase-align places the pin a few frames before that export end,
        drop those frames from the previous export before concat (v7)
     """
@@ -603,6 +604,27 @@ def generation_frame_budget(visible_frames: int, context_frames: int) -> tuple[i
             f"length {sample}f."
         )
     return sample, ctx
+
+
+def continuity_export_len(
+    *,
+    trim_frames: int,
+    sample_len: int,
+    visible_frames: int,
+    target_len: int,
+    keep_tail: bool,
+) -> int:
+    """Frames to keep after dropping the pinned head.
+
+    ``keep_tail`` (enabled by default in Director plans) keeps ``sample - trim``
+    including the 17k+5 remainder, typically 12 frames. Disabling it crops the
+    free region back to the UI visible length.
+    """
+    if int(trim_frames) <= 0:
+        return int(target_len)
+    if keep_tail:
+        return max(1, int(sample_len) - int(trim_frames))
+    return int(visible_frames)
 
 
 def handoff_end_frame(*, trim_frames: int, export_frames: int) -> int:
