@@ -58,6 +58,9 @@ def sample_single_stage(
     memory_debug=None,
     timing_prefix: str = "First",
     after_shift=None,
+    enable_tiling: bool = False,
+    tile_count: int = 2,
+    tile_overlap: int = 128,
 ):
     import torch
     from comfy_extras.nodes_custom_sampler import (
@@ -103,6 +106,15 @@ def sample_single_stage(
 
     sampler_obj = _unpack_node_output(KSamplerSelect.execute(str(sampler_name)))[0]
     noise_obj = _unpack_node_output(RandomNoise.execute(int(seed)))[0]
+    restore_tiles = None
+    if enable_tiling:
+        from .spatial_tiled_sampling import wrap_sampler_spatial_tiles
+
+        restore_tiles = wrap_sampler_spatial_tiles(
+            sampler_obj,
+            n_tiles=tile_count,
+            overlap_pixels=tile_overlap,
+        )
 
     neg = negative if negative else []
     if _use_basic_guider(cfg, neg):
@@ -118,46 +130,44 @@ def sample_single_stage(
         )
         return _unpack_node_output(sampled)[0]
 
-    load_ctx = (
-        memory_debug.watch_model_load(prefix)
-        if memory_debug is not None
-        else nullcontext()
-    )
-    if memory_debug is not None:
-        memory_debug.timing(f"{prefix} Sampler Start")
-    t_sample = time.perf_counter()
-    with load_ctx:
-        if on_step_preview is None:
+    orig_sample = guider.sample if on_step_preview is not None else None
+    if orig_sample is not None:
+        every = max(1, int(preview_every))
+
+        def sample_wrapped(noise, latent_image, sampler, sigmas_in, **kwargs):
+            inner_cb = kwargs.get("callback")
+
+            def callback(step, x0, x, total_steps):
+                try:
+                    last = max(0, int(total_steps) - 1)
+                    if int(preview_every) < 0:
+                        show = step >= last
+                    else:
+                        show = step % every == 0 or step >= last
+                    if show:
+                        on_step_preview(int(step), int(total_steps), x0)
+                except Exception as exc:
+                    log.debug("Step preview callback skipped: %s", exc)
+                if inner_cb is not None:
+                    inner_cb(step, x0, x, total_steps)
+
+            kwargs["callback"] = callback
+            return orig_sample(noise, latent_image, sampler, sigmas_in, **kwargs)
+
+        guider.sample = sample_wrapped
+    try:
+        load_ctx = memory_debug.watch_model_load(prefix) if memory_debug is not None else nullcontext()
+        if memory_debug is not None:
+            memory_debug.timing(f"{prefix} Sampler Start")
+        t_sample = time.perf_counter()
+        with load_ctx:
             out = _run_official()
-        else:
-            orig_sample = guider.sample
-            every = max(1, int(preview_every))
+    finally:
+        if orig_sample is not None:
+            guider.sample = orig_sample
+        if restore_tiles is not None:
+            restore_tiles()
 
-            def sample_wrapped(noise, latent_image, sampler, sigmas_in, **kwargs):
-                inner_cb = kwargs.get("callback")
-
-                def callback(step, x0, x, total_steps):
-                    try:
-                        last = max(0, int(total_steps) - 1)
-                        if int(preview_every) < 0:
-                            show = step >= last
-                        else:
-                            show = step % every == 0 or step >= last
-                        if show:
-                            on_step_preview(int(step), int(total_steps), x0)
-                    except Exception as exc:
-                        log.debug("Step preview callback skipped: %s", exc)
-                    if inner_cb is not None:
-                        inner_cb(step, x0, x, total_steps)
-
-                kwargs["callback"] = callback
-                return orig_sample(noise, latent_image, sampler, sigmas_in, **kwargs)
-
-            guider.sample = sample_wrapped
-            try:
-                out = _run_official()
-            finally:
-                guider.sample = orig_sample
     if memory_debug is not None:
         memory_debug.timing(f"{prefix} Sampler End", elapsed_s=time.perf_counter() - t_sample)
         memory_debug.timing(f"{prefix} Sample Cleanup Start")

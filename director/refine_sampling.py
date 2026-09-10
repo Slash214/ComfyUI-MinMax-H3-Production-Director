@@ -357,6 +357,7 @@ def _apply_h3_latent_upscale(
         source_height=src_h,
         model_name=model_name,
         model=latent_mod,
+        enable_latent_chunking=bool(pack.get("enable_latent_chunking", False)),
     )
     if isinstance(encoded, dict):
         encoded.pop("noise_mask", None)
@@ -575,6 +576,10 @@ def apply_segment_refine(
         sigma_steps = max(1, len(sigma_list) - 1)
         how = "sigmas wired" if wired_sigmas else f"sigma {sigma_sampler}"
         note_parts.append(f"{how} {sigma_steps}-step")
+        if pack.get("enable_tiling"):
+            tile_count = max(1, min(8, int(pack.get("tile_count") or 2)))
+            overlap = max(0, int(pack.get("tile_overlap", 128)))
+            note_parts.append(f"spatial tiles {tile_count} overlap {overlap}px")
         if refine_model is not model and sigma_steps <= 4:
             log.warning(
                 "Refine sigma pass is short. "
@@ -635,6 +640,11 @@ def apply_segment_refine(
                 apply_shift=True,
                 memory_debug=memory_debug if memory_debug is not None and memory_debug.enabled else None,
                 timing_prefix="Refine",
+
+
+                enable_tiling=bool(pack.get("enable_tiling", False)),
+                tile_count=int(pack.get("tile_count") or 2),
+                tile_overlap=int(pack.get("tile_overlap", 128)),
             )
             last_ok = work
             if memory_debug is not None and i == 0:
