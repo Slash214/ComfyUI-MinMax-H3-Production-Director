@@ -122,8 +122,15 @@ class ContinueMaskTests(unittest.TestCase):
 
     def test_invalid_strength_is_clamped(self):
         m = self.module
-        for value, expected in ((None, 0.65), (float("nan"), 0.65), (-1, 0.4), (2, 0.95)):
+        for value, expected in ((None, 0.10), (float("nan"), 0.10), (-1, 0.0), (0, 0.0), (2, 0.95)):
             self.assertEqual(m.clamp_seam_min_mask(value), expected)
+
+    def test_zero_redraw_hard_locks_seam_but_not_free_tail(self):
+        m = self.module
+        remask = m._PrefixRemask(4, [1.0, 0.5, 0.0], (1, 1, 7, 2, 2), seam_min=0.0)
+        mask = remask.denoise_mask_function(torch.tensor([0.5]), torch.ones(1, 1, 7, 2, 2))
+        self.assertTrue(torch.all(mask[:, :, 3:4] == 0))
+        self.assertTrue(torch.all(mask[:, :, 4:] == 1))
 
 
 if __name__ == "__main__":
