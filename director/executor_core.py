@@ -249,10 +249,6 @@ def _build_minimax_inputs(
         # Empty fl2v shot = text-to-video. Do not invent keyframes from the
         # 1×16×16 gray placeholder or a held clip. End-only also must not
         # promote clip_frames[0] into first_frame.
-        if first_frame is not None and last_frame is None and clip_frames is not None:
-            # Start+end endpoint hold: last may only live on the clip tail.
-            if clip_frames.shape[0] >= 2:
-                last_frame = clip_frames[-1:].clone()
     elif task_key == "i2v":
         # Explicit per-segment image wins; motion-context path leaves first_frame empty
         # so the previous tail can be pinned as a multi-frame head instead.

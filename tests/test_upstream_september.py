@@ -133,5 +133,38 @@ class ContinueMaskTests(unittest.TestCase):
         self.assertTrue(torch.all(mask[:, :, 4:] == 1))
 
 
+class Fl2vEndpointTests(unittest.TestCase):
+    def build(self, refs):
+        ns = functions_from("director/executor_core.py", {})
+        ns["_ref_tensor_from_seg_refs"] = lambda values, index: values.get(index)
+        held_start = torch.ones(124, 2, 2, 3)
+        return ns["_build_minimax_inputs"](
+            SimpleNamespace(), SimpleNamespace(task_key="fl2v", refs=refs),
+            clip_frames=held_start, ctx_w=2, ctx_h=2, prev_tail=None,
+        )[:2]
+
+    def test_start_only_does_not_lock_end_to_held_source(self):
+        start = torch.ones(1, 2, 2, 3)
+        first, last = self.build({0: start})
+        self.assertIs(first, start)
+        self.assertIsNone(last)
+
+    def test_explicit_end_is_preserved(self):
+        start = torch.ones(1, 2, 2, 3)
+        end = torch.zeros_like(start)
+        first, last = self.build({0: start, 1: end})
+        self.assertIs(first, start)
+        self.assertIs(last, end)
+
+    def test_end_only_does_not_invent_start(self):
+        end = torch.zeros(1, 2, 2, 3)
+        first, last = self.build({1: end})
+        self.assertIsNone(first)
+        self.assertIs(last, end)
+
+    def test_unanchored_continuation_has_no_endpoints(self):
+        self.assertEqual(self.build({}), (None, None))
+
+
 if __name__ == "__main__":
     unittest.main()

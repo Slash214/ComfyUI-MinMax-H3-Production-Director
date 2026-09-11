@@ -420,6 +420,32 @@ def _apply_h3_latent_upscale(
     return work, refine_positive, notes
 
 
+def _resize_refine_keyframes(conditioning, vae, width: int, height: int):
+    """Re-encode FL2V anchors when the sampled video canvas changes.
+
+    Work on copies: the first-pass conditioning may be cached or shared.
+    """
+    result = []
+    for tensor, metadata in conditioning or []:
+        updated = dict(metadata)
+        keyframes = metadata.get("minimax_keyframes")
+        if keyframes:
+            rebuilt = []
+            for original in keyframes:
+                kf = dict(original)
+                latent = kf.get("latent")
+                if isinstance(latent, torch.Tensor):
+                    # H3 spatial VAE stride is 32; time and frame-index semantics stay unchanged.
+                    if tuple(latent.shape[-2:]) != (height // 32, width // 32):
+                        images = _decode_video(vae, {"samples": latent})
+                        images = _scale_images(images, width, height)
+                        kf["latent"] = _encode_video(vae, images)["samples"]
+                rebuilt.append(kf)
+            updated["minimax_keyframes"] = rebuilt
+        result.append([tensor, updated])
+    return result
+
+
 def _repin_after_upscale(
     positive,
     latent: dict,
@@ -622,6 +648,7 @@ def apply_segment_refine(
     # No continuity → drop stray masks so refine can touch the whole clip.
     work = dict(samples) if pin_frames > 0 else _latent_without_mask(samples)
     refine_positive = positive
+    refine_negative = negative
     last_ok = samples
     try:
         if refine_needs_canvas(pack):
@@ -735,6 +762,12 @@ def apply_segment_refine(
                     exc,
                 )
 
+        if refine_needs_canvas(pack) and mode != "latent_upscale":
+            # The first FL2V segment has no continuity prefix to rebuild its anchor.
+            # Followers can also retain a stock last-frame anchor at the old size.
+            refine_positive = _resize_refine_keyframes(refine_positive, vae, tw, th)
+            refine_negative = _resize_refine_keyframes(refine_negative, vae, tw, th)
+
         if mode == "latent_upscale":
             if on_phase:
                 on_phase("refine", 1)
@@ -796,7 +829,7 @@ def apply_segment_refine(
             work = sample_single_stage(
                 model=refine_model,
                 positive=refine_positive,
-                negative=negative,
+                negative=refine_negative,
                 latent=work,
                 seed=refine_seed_for(pack, seed, pass_index=i),
                 cfg=cfg,
